@@ -1,0 +1,12 @@
+# Biometric Authentication System - Python dependencies
+# Tested on Pop!_OS with Python 3.12 and OpenCV 5.0.0.93.
+# Install with: pip install -r requirements.txt
+#
+# Note: tkinter (GUI) is part of the Python standard library,
+# but on Debian/Ubuntu it requires the system package python3-tk.
+
+opencv-contrib-python>=4.8.0
+numpy>=1.24
+Pillow>=9.0
+cryptography>=41.0
+pytest>=7.0

@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments (dependencies are listed in requirements.txt)
+venv/
+.venv/
+env/
+
+# Tests / coverage / type-checking caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Local secrets and biometric data must never be committed.
+database/*.db
+database/*.db-*
+database/*.key
+database/*.json
+keys/
+.env
+*.env
+
+# Generated outputs
+results/*
+!results/.gitkeep
+*.log
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
