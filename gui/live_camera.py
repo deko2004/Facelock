@@ -7,6 +7,17 @@ import re
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from core.anti_spoofing import (
+    PAD_ANALYZING,
+    PAD_DISABLED,
+    PAD_ERROR,
+    PAD_LIVE,
+    PAD_LOADING,
+    PAD_NO_FACE,
+    PAD_READY,
+    PAD_SPOOF,
+    PAD_UNCERTAIN,
+)
 from core.camera_manager import CameraError, list_video_devices
 from core.database import DatabaseError, UserNotFoundError
 from core.matcher import EnrolledIdentity
@@ -77,7 +88,29 @@ class LiveCameraPage(BasePage):
         )
         self.stop_button.grid(row=0, column=7)
 
+        self.pad_var = tk.BooleanVar(value=False)
+        self.pad_toggle = ttk.Checkbutton(
+            controls,
+            text="Anti-Spoofing Protection",
+            variable=self.pad_var,
+            command=self._on_pad_toggle,
+        )
+        self.pad_toggle.grid(row=1, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        self.pad_toggle_badge = Badge(controls, "OFF", "muted")
+        self.pad_toggle_badge.grid(
+            row=1, column=2, sticky="w", padx=(4, 8), pady=(12, 0)
+        )
         ttk.Label(
+            controls,
+            text=(
+                "MiniFASNetV2 checks the primary face for presentation attacks "
+                "before SFace identity verification."
+            ),
+            style="CardMuted.TLabel",
+            wraplength=760,
+        ).grid(row=1, column=3, columnspan=5, sticky="w", pady=(12, 0))
+
+        self.pad_hint = ttk.Label(
             controls,
             text=(
                 "Live mode labels any detected face whose best enrolled match "
@@ -87,7 +120,8 @@ class LiveCameraPage(BasePage):
             ),
             style="CardMuted.TLabel",
             wraplength=1100,
-        ).grid(row=1, column=0, columnspan=8, sticky="w", pady=(10, 0))
+        )
+        self.pad_hint.grid(row=2, column=0, columnspan=8, sticky="w", pady=(10, 0))
 
         self.panel = ImagePanel(
             self,
@@ -115,21 +149,11 @@ class LiveCameraPage(BasePage):
         self.user_value = self._status_row(
             status_card, 10, "Target user", "No target (identification only)"
         )
-
-        ttk.Label(
-            status_card,
-            text=(
-                "A static photograph can also produce a match. YuNet and SFace "
-                "do not provide liveness detection. 1:N name labels are a "
-                "demonstration, not an access-control decision."
-            ),
-            style="CardMuted.TLabel",
-            wraplength=330,
-            justify="left",
-        ).grid(row=12, column=0, sticky="w", pady=(18, 0))
+        self.pad_value = self._status_row(status_card, 12, "Anti-spoofing", "OFF")
 
         self._refresh_cameras()
         self._refresh_users()
+        self._refresh_pad_state()
 
     def _status_row(self, parent: tk.Misc, row: int, title: str, value: str) -> ttk.Label:
         ttk.Label(parent, text=title.upper(), style="CardMuted.TLabel").grid(
@@ -143,6 +167,7 @@ class LiveCameraPage(BasePage):
         self._refresh_cameras()
         self._refresh_users()
         self.threshold_value.configure(text=f"{self.ctx.threshold:.3f}")
+        self._refresh_pad_state()
 
     def on_hide(self) -> None:
         self._stop(silent=True)
@@ -203,8 +228,165 @@ class LiveCameraPage(BasePage):
             )
         return identities
 
+    def _pad_status_info(self, status: str) -> tuple[str, str, str]:
+        return {
+            PAD_DISABLED: (
+                "OFF",
+                "muted",
+                "Protection is off. Static photos and screen replays may be accepted.",
+            ),
+            PAD_READY: (
+                "ON",
+                "success",
+                "Protection is on. Start the camera to analyze faces.",
+            ),
+            PAD_LOADING: (
+                "LOADING",
+                "warning",
+                "Loading MiniFASNetV2...",
+            ),
+            PAD_ERROR: (
+                "PAD ERROR",
+                "danger",
+                "The model could not be loaded. Authentication is blocked while "
+                "protection is on.",
+            ),
+            PAD_NO_FACE: (
+                "NO FACE",
+                "warning",
+                "No face detected. Authentication is blocked.",
+            ),
+            PAD_ANALYZING: (
+                "ANALYZING",
+                "info",
+                "Checking liveness. Hold still.",
+            ),
+            PAD_LIVE: (
+                "LIVE FACE",
+                "success",
+                "Live face confirmed. SFace identity verification may proceed.",
+            ),
+            PAD_SPOOF: (
+                "SPOOF DETECTED",
+                "danger",
+                "Presentation attack detected. Authentication is blocked.",
+            ),
+            PAD_UNCERTAIN: (
+                "LOW CONFIDENCE",
+                "warning",
+                "Liveness confidence is too low. Hold still and improve lighting.",
+            ),
+        }.get(status, (status, "muted", ""))
+
+    def _update_pad_ui(
+        self,
+        status: str,
+        message: str | None = None,
+        live_score: float | None = None,
+        streak: int = 0,
+        required: int = 0,
+    ) -> None:
+        badge_text, kind, default_hint = self._pad_status_info(status)
+        colours = {
+            "success": COLORS["success"],
+            "danger": COLORS["danger"],
+            "warning": COLORS["warning"],
+            "info": COLORS["accent"],
+            "muted": COLORS["muted"],
+        }
+        self.pad_value.configure(
+            text=badge_text,
+            foreground=colours.get(kind, COLORS["text"]),
+        )
+        if status == PAD_DISABLED:
+            self.pad_toggle_badge.set("OFF", "muted")
+        elif status == PAD_LOADING:
+            self.pad_toggle_badge.set("LOADING", "warning")
+        elif status == PAD_ERROR:
+            self.pad_toggle_badge.set("ERROR", "danger")
+        elif self.pad_var.get():
+            self.pad_toggle_badge.set("ON", "success")
+        else:
+            self.pad_toggle_badge.set("OFF", "muted")
+        hint = message or default_hint
+        if live_score is not None:
+            hint = f"{hint}  Live confidence {live_score:.3f}."
+            if required:
+                hint = f"{hint} Evidence {streak}/{required} live frames."
+        self.pad_hint.configure(text=hint)
+
+    def _set_start_button_state(self) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            self.start_button.configure(state="disabled")
+            return
+        snapshot = self.ctx.anti_spoofing.runtime.snapshot()
+        if snapshot.enabled and snapshot.detector is None:
+            self.start_button.configure(state="disabled")
+        else:
+            self.start_button.configure(state="normal")
+
+    def _refresh_pad_state(self) -> None:
+        snapshot = self.ctx.anti_spoofing.runtime.snapshot()
+        if not snapshot.enabled:
+            self.pad_var.set(False)
+            self._update_pad_ui(PAD_DISABLED)
+            self._set_start_button_state()
+            return
+        self.pad_var.set(True)
+        if snapshot.detector is not None:
+            self._update_pad_ui(PAD_READY)
+        elif snapshot.error:
+            self._update_pad_ui(PAD_ERROR, snapshot.error)
+        else:
+            self._update_pad_ui(PAD_LOADING)
+        self._set_start_button_state()
+
+    def _on_pad_toggle(self) -> None:
+        if not self.pad_var.get():
+            self.ctx.anti_spoofing.disable()
+            self._refresh_pad_state()
+            return
+
+        self.ctx.anti_spoofing.enable()
+        snapshot = self.ctx.anti_spoofing.runtime.snapshot()
+        if snapshot.detector is not None:
+            self._refresh_pad_state()
+            return
+
+        self._update_pad_ui(PAD_LOADING)
+        self._set_start_button_state()
+        self.run_background(
+            self.ctx.anti_spoofing.ensure_loaded,
+            self._on_pad_loaded,
+            self._on_pad_load_error,
+        )
+
+    def _on_pad_loaded(self, _detector) -> None:
+        if self._worker is not None and self._worker.is_alive():
+            self.pad_var.set(True)
+            self._update_pad_ui(PAD_ANALYZING, "Starting liveness checks...")
+            self._set_start_button_state()
+        else:
+            self._refresh_pad_state()
+
+    def _on_pad_load_error(self, exc: Exception) -> None:
+        if self.pad_var.get():
+            self._update_pad_ui(PAD_ERROR, str(exc))
+            self._set_start_button_state()
+            messagebox.showerror("Anti-spoofing unavailable", str(exc))
+        else:
+            self._refresh_pad_state()
+
     def _start(self) -> None:
         if self._worker is not None and self._worker.is_alive():
+            return
+        pad_snapshot = self.ctx.anti_spoofing.runtime.snapshot()
+        if pad_snapshot.enabled and pad_snapshot.detector is None:
+            messagebox.showerror(
+                "Anti-spoofing unavailable",
+                pad_snapshot.error
+                or "The anti-spoofing model is still loading. Wait a moment.",
+            )
             return
         user_id, user = self._selected_user()
         if self.user_var.get() in self._user_map and user is None:
@@ -229,6 +411,10 @@ class LiveCameraPage(BasePage):
             )
         )
         self.score_value.configure(text="-")
+        if pad_snapshot.enabled:
+            self._update_pad_ui(PAD_ANALYZING, "Starting liveness checks...")
+        else:
+            self._update_pad_ui(PAD_DISABLED)
         self._worker = LiveCameraWorker(
             engine=self.ctx.engine,
             camera_index=self._camera_index(),
@@ -236,6 +422,7 @@ class LiveCameraPage(BasePage):
             user_id=user_id,
             threshold=self.ctx.threshold,
             identities=identities,
+            pad_runtime=self.ctx.anti_spoofing.runtime,
         )
         self._worker.start()
         self._poll()
@@ -275,6 +462,45 @@ class LiveCameraPage(BasePage):
         else:
             self.face_value.configure(text=str(len(result.detections)))
         self.fps_value.configure(text=f"{result.fps:.1f}")
+
+        if result.pad_enabled:
+            self._update_pad_ui(
+                result.pad_status,
+                result.pad_message,
+                result.pad_live_score,
+                result.pad_live_streak,
+                result.pad_required_frames,
+            )
+            if result.pad_status == PAD_LIVE:
+                if result.similarity is not None:
+                    self.score_value.configure(text=f"{result.similarity:.4f}")
+                    if result.verified:
+                        self.state_badge.set("VERIFIED", "success")
+                    else:
+                        self.state_badge.set("NOT VERIFIED", "danger")
+                elif result.recognized_count:
+                    self.score_value.configure(text="-")
+                    self.state_badge.set("FACE RECOGNIZED", "success")
+                else:
+                    self.score_value.configure(text="-")
+                    self.state_badge.set("LIVE FACE", "success")
+                return
+            blocked = {
+                PAD_SPOOF: ("AUTH BLOCKED", "danger"),
+                PAD_ERROR: ("PAD ERROR", "danger"),
+                PAD_LOADING: ("PAD LOADING", "warning"),
+                PAD_NO_FACE: ("NO FACE", "warning"),
+                PAD_ANALYZING: ("PAD CHECK", "info"),
+                PAD_UNCERTAIN: ("HOLD STILL", "warning"),
+            }
+            if result.pad_status in blocked:
+                self.score_value.configure(text="-")
+                text, kind = blocked[result.pad_status]
+                self.state_badge.set(text, kind)
+                return
+        else:
+            self._update_pad_ui(PAD_DISABLED)
+
         if result.similarity is None:
             self.score_value.configure(text="-")
             if result.recognized_count:
@@ -315,3 +541,4 @@ class LiveCameraPage(BasePage):
             self.face_value.configure(text="-")
             self.fps_value.configure(text="-")
             self.score_value.configure(text="-")
+        self._refresh_pad_state()

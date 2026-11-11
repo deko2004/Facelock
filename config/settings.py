@@ -22,6 +22,23 @@ DOCS_DIR = BASE_DIR / "docs"
 YUNET_MODEL = MODELS_DIR / "face_detection_yunet_2023mar.onnx"
 SFACE_MODEL = MODELS_DIR / "face_recognition_sface_2021dec.onnx"
 
+ANTI_SPOOFING_DIR = MODELS_DIR / "anti_spoofing"
+PAD_MODEL = Path(
+    os.environ.get(
+        "FACE_PAD_MODEL",
+        str(ANTI_SPOOFING_DIR / "MiniFASNetV2.onnx"),
+    )
+)
+PAD_MODEL_LABEL = "MiniFASNetV2 (ONNX)"
+PAD_INPUT_SIZE = (80, 80)
+PAD_CROP_SCALE = 2.7
+PAD_CLASS_LIVE_INDEX = 1
+PAD_LIVE_THRESHOLD = float(os.environ.get("FACE_PAD_LIVE_THRESHOLD", "0.80"))
+PAD_SPOOF_THRESHOLD = float(os.environ.get("FACE_PAD_SPOOF_THRESHOLD", "0.60"))
+PAD_REQUIRED_LIVE_FRAMES = int(os.environ.get("FACE_PAD_REQUIRED_LIVE_FRAMES", "3"))
+PAD_FRAME_INTERVAL = int(os.environ.get("FACE_PAD_FRAME_INTERVAL", "2"))
+PAD_FACE_IOU_THRESHOLD = float(os.environ.get("FACE_PAD_FACE_IOU_THRESHOLD", "0.35"))
+
 DATABASE_FILE = DATABASE_DIR / "biometric.db"
 TEMPLATE_KEY_FILE = DATABASE_DIR / "templates.key"
 APP_SETTINGS_FILE = DATABASE_DIR / "app_settings.json"
@@ -61,7 +78,13 @@ OPENCV_SFACE_COSINE_THRESHOLD = 0.363
 
 def ensure_directories() -> None:
     """Create the runtime directories if they do not already exist."""
-    for directory in (DATABASE_DIR, IMAGES_DIR, RESULTS_DIR, EVALUATION_DIR):
+    for directory in (
+        DATABASE_DIR,
+        IMAGES_DIR,
+        RESULTS_DIR,
+        EVALUATION_DIR,
+        ANTI_SPOOFING_DIR,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
 
 

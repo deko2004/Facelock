@@ -104,9 +104,11 @@ class SecurityPage(BasePage):
             spoof,
             text=(
                 "LIMITATION: YuNet and SFace perform detection and recognition only. "
-                "This project does not implement a PAD or liveness model. A static "
-                "photograph can therefore be accepted. A successful match is not "
-                "proof that the person is alive or physically present."
+                "The Live Camera page has an optional MiniFASNetV2 PAD toggle, but it "
+                "is a demonstration, not certified liveness detection. With PAD OFF, "
+                "a static photograph can be accepted; even with PAD ON, determined "
+                "presentation attacks may succeed. A successful match is not proof "
+                "that the person is alive or physically present."
             ),
             bg=COLORS["warning_dark"],
             fg=COLORS["warning"],
@@ -129,9 +131,10 @@ class SecurityPage(BasePage):
             demo,
             text=(
                 "Choose an enrolled user and a still photograph of that person. "
-                "The system will probably accept the still image because there is "
-                "no liveness check. This is a safe demonstration of the limitation, "
-                "not a real attack tool."
+                "The system will probably accept the still image because this demo "
+                "calls the verification service directly and bypasses the Live "
+                "Camera PAD check. It is a safe demonstration of why recognition "
+                "alone is not liveness, not a real attack tool."
             ),
             style="CardMuted.TLabel",
             wraplength=1100,
@@ -190,7 +193,7 @@ class SecurityPage(BasePage):
         bullet_text(
             not_protected,
             [
-                "Presentation attacks, masks, replay and deepfakes (no PAD model).",
+                "Presentation attacks, masks, replay and deepfakes beyond what the optional MiniFASNetV2 demo can detect.",
                 "An attacker with read access to both the database and the key file.",
                 "An attacker with administrator/root access or debugger access.",
                 "Template inversion or reconstruction attacks against face embeddings.",
@@ -270,9 +273,10 @@ class SecurityPage(BasePage):
         if result.verified:
             self.demo_message_label.configure(
                 text=(
-                    "The still image was accepted. This demonstrates that the system "
-                    "has no liveness detection: matching a face is not proof that a "
-                    "live person is present."
+                    "The still image was accepted. This demonstrates that the 1:1 "
+                    "verification service alone has no liveness check: matching a "
+                    "face is not proof that a live person is present. Use Live Camera "
+                    "with Anti-Spoofing Protection ON to exercise the optional PAD."
                 ),
                 foreground=COLORS["warning"],
             )
@@ -280,7 +284,8 @@ class SecurityPage(BasePage):
             self.demo_message_label.configure(
                 text=(
                     "This still image was rejected, but rejection does not prove "
-                    "liveness either. The system still has no PAD model."
+                    "liveness either. This demo bypasses the optional Live Camera "
+                    "PAD check."
                 ),
                 foreground=COLORS["muted"],
             )

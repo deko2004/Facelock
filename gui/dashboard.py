@@ -77,7 +77,8 @@ class DashboardPage(BasePage):
             pipeline,
             text=(
                 "The score is a cosine similarity, not a probability of identity. "
-                "No liveness or presentation-attack detection is implemented."
+                "Optional MiniFASNetV2 PAD is available on Live Camera; it is off "
+                "by default and is not a certified liveness guarantee."
             ),
             style="CardMuted.TLabel",
             wraplength=560,
@@ -97,7 +98,7 @@ class DashboardPage(BasePage):
                 "The Fernet key is stored separately from the database.",
                 "Raw feature vectors are never written to logs.",
                 "Users can be deleted together with their template.",
-                "No PAD/liveness model: a printed photo can still be matched.",
+                "Optional PAD on Live Camera; OFF mode can still match a printed photo.",
             ],
             wraplength=380,
         ).pack(anchor="w", pady=(10, 0))

@@ -119,10 +119,12 @@ class AboutPage(BasePage):
             disclaimer,
             text=(
                 "This is an academic demonstration. It is not a production identity "
-                "verification system. It provides no liveness/PAD protection, no "
-                "certified bias evaluation, no secure hardware key storage and no "
-                "operational threshold calibration. Do not use it to protect real "
-                "accounts, buildings or sensitive data."
+                "verification system. The Live Camera page offers optional, "
+                "non-certified MiniFASNetV2 presentation-attack detection, but no "
+                "certified liveness guarantee, no certified bias evaluation, no "
+                "secure hardware key storage and no operational threshold "
+                "calibration. Do not use it to protect real accounts, buildings or "
+                "sensitive data."
             ),
             bg=COLORS["danger_dark"],
             fg=COLORS["danger"],
@@ -144,6 +146,7 @@ class AboutPage(BasePage):
                 "OpenCV FaceDetectorYN / YuNet documentation and OpenCV Zoo model card.",
                 "OpenCV FaceRecognizerSF / SFace documentation and model card.",
                 "OpenCV Zoo: face_detection_yunet_2023mar.onnx and face_recognition_sface_2021dec.onnx.",
+                "MiniFASNetV2 (yakhyo/face-anti-spoofing, Apache-2.0) and Silent-Face-Anti-Spoofing.",
                 "NIST FRVT / FATE PAD resources for presentation-attack terminology.",
                 "cryptography.io Fernet documentation.",
                 "Python sqlite3 and tkinter documentation.",

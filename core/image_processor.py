@@ -177,6 +177,39 @@ def draw_faces(
     return annotated
 
 
+def draw_pad_status(image: np.ndarray, text: str, status: str) -> np.ndarray:
+    """Draw a compact anti-spoofing banner across the top of a frame."""
+    colours = {
+        "LIVE": (40, 200, 120),
+        "SPOOF": (60, 60, 255),
+        "ERROR": (60, 60, 255),
+        "ANALYZING": (0, 180, 255),
+        "UNCERTAIN": (0, 210, 255),
+        "NO_FACE": (0, 170, 255),
+        "LOADING": (0, 180, 255),
+    }
+    colour = colours.get(status, (255, 255, 255))
+    annotated = image.copy()
+    cv2.rectangle(
+        annotated,
+        (0, 0),
+        (annotated.shape[1], 40),
+        (12, 20, 36),
+        thickness=-1,
+    )
+    cv2.putText(
+        annotated,
+        text,
+        (12, 27),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.62,
+        colour,
+        2,
+        cv2.LINE_AA,
+    )
+    return annotated
+
+
 def draw_comparison_result(
     image: np.ndarray,
     score: float,

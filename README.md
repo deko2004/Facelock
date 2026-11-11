@@ -7,8 +7,9 @@ Tkinter interface, encrypted template storage and an honest evaluation pipeline.
 
 **Arabic overview:** [README.ar.md](README.ar.md)
 
-> **Academic demonstration only.** This is not a production identity system. It
-> has no liveness/PAD protection, no certified bias evaluation, no hardware-backed
+> **Academic demonstration only.** This is not a production identity system. The
+> optional MiniFASNetV2 PAD check is a demonstration, not a guarantee against all
+> presentation attacks. It has no certified bias evaluation, no hardware-backed
 > key storage and no operational threshold calibration. Do not use it to protect
 > real accounts, buildings or sensitive data.
 
@@ -18,6 +19,9 @@ Tkinter interface, encrypted template storage and an honest evaluation pipeline.
   similarity score with a threshold decision.
 - **Live camera identification and verification**: label detected faces with the
   closest enrolled name, and optionally run 1:1 verification against one user.
+- **Optional anti-spoofing protection**: toggle MiniFASNetV2 PAD on the Live
+  Camera page. When enabled, the largest face must pass a temporal liveness check
+  before SFace identity verification runs.
 - **Enrolment**: create a local user from an uploaded image or webcam frame.
   Consent is required and the original photograph is not stored.
 - **Database**: list, search and delete enrolled users; inspect non-biometric
@@ -33,8 +37,8 @@ Tkinter interface, encrypted template storage and an honest evaluation pipeline.
 
 ## Quick start
 
-Tested on Pop!_OS 22.04 with Python 3.12, OpenCV 5.0.0, Tkinter 8.6 and a
-`/dev/video0` webcam.
+Tested on Pop!_OS 22.04 with Python 3.12, OpenCV 5.0.0, onnxruntime 1.31.1,
+Tkinter 8.6 and a `/dev/video0` webcam.
 
 ```bash
 cd /home/deku/FaceRecognitionProject
@@ -65,17 +69,41 @@ curl -L -o models/face_recognition_sface_2021dec.onnx \
   https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx
 ```
 
+The optional anti-spoofing model is included at:
+
+```text
+models/anti_spoofing/MiniFASNetV2.onnx
+```
+
+If it is missing, the application still starts and works with Anti-Spoofing
+Protection OFF. To restore it:
+
+```bash
+mkdir -p models/anti_spoofing
+curl -L -o models/anti_spoofing/MiniFASNetV2.onnx \
+  https://github.com/yakhyo/face-anti-spoofing/releases/download/weights/MiniFASNetV2.onnx
+```
+
+SHA-256:
+`b32929adc2d9c34b9486f8c4c7bc97c1b69bc0ea9befefc380e4faae4e463907`.
+See `models/anti_spoofing/README.md` for provenance, the exact preprocessing
+contract and Apache-2.0 attribution.
+
 ## Main workflows
 
 1. Open **Enrolment**, enter a user ID and display name, tick consent, then load
    an image or capture a frame.
 2. Open **Verification**, select the enrolled user and compare an image or a live
    camera frame.
-3. Open **Compare Images** for a direct two-photo comparison that does not require
+3. On **Live Camera**, tick **Anti-Spoofing Protection** to require a live face
+   before SFace identity verification. The toggle takes effect without restarting
+   the camera. If the model or `onnxruntime` is unavailable, the toggle shows an
+   explicit error and authentication is blocked while it remains on.
+4. Open **Compare Images** for a direct two-photo comparison that does not require
    enrolment.
-4. Use **Database** to review or delete enrolled users. Deletion removes the
+5. Use **Database** to review or delete enrolled users. Deletion removes the
    encrypted template and writes an audit event.
-5. Use **Evaluation** with a folder arranged as
+6. Use **Evaluation** with a folder arranged as
    `dataset/<identity>/<image files>`.
 
 The default threshold is `0.363`, OpenCV's published SFace cosine reference for
@@ -136,12 +164,15 @@ The full threat model is in
 venv/bin/python -m pytest
 ```
 
-Current result: **90 passed**. The suite covers model loading and detection,
+Current result: **105 passed**. The suite covers model loading and detection,
 quality checks, matching math, 1:N identification labels, encryption, database
 behaviour, enrolment, verification, evaluation, camera lifecycle with mocked
-captures, settings and a GUI page-construction smoke test. The GUI smoke test is
-skipped automatically when no graphical display is available; no physical
-webcam is required for the test suite.
+captures, settings, PAD preprocessing/class mapping, temporal PAD decisions,
+PAD-blocked camera results and a GUI page-construction smoke test. The PAD
+effectiveness tests use the official Silent-Face genuine/attack samples and a
+synthetic screen-replay sample. The GUI smoke test is skipped automatically when
+no graphical display is available; no physical webcam is required for the test
+suite.
 
 ## Project layout
 
@@ -150,7 +181,7 @@ config/       Settings, paths and threshold persistence
 core/         Detection, embeddings, matching, storage, enrolment, verification,
               evaluation, camera lifecycle and the composition root
 gui/          Tkinter pages, styling, widgets and the camera worker thread
-models/       YuNet and SFace ONNX files (not generated by this project)
+models/       YuNet, SFace and optional MiniFASNetV2 ONNX files
 images/       Sample images and the small public evaluation demo
 database/     Local SQLite database and encryption key (git-ignored)
 results/      Generated evaluation artifacts
@@ -173,7 +204,9 @@ docs/         Setup, usage, architecture, security, evaluation and tool selectio
 
 ## Limitations
 
-- No presentation-attack detection or liveness guarantee.
+- Anti-spoofing is optional and is not a guarantee against all presentation
+  attacks. The default PAD thresholds are not calibrated for every camera,
+  printer or display; determined attackers may still succeed.
 - No demographic bias evaluation; the sample set is far too small and not
   representative.
 - The threshold is not calibrated on a validation set.

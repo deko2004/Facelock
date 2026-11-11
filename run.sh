@@ -76,6 +76,20 @@ if [ ! -f "$YUNET" ] || [ ! -f "$SFACE" ]; then
     exit 1
 fi
 
+PAD_MODEL="$ROOT_DIR/models/anti_spoofing/MiniFASNetV2.onnx"
+if [ ! -f "$PAD_MODEL" ]; then
+    echo "WARNING: optional anti-spoofing model is missing."
+    echo "  Expected: $PAD_MODEL"
+    echo "  Download: https://github.com/yakhyo/face-anti-spoofing/releases/download/weights/MiniFASNetV2.onnx"
+    echo "  The app will start, but Anti-Spoofing Protection will be unavailable."
+fi
+
+if ! "$PYTHON" -c "import onnxruntime" >/dev/null 2>&1; then
+    echo "WARNING: onnxruntime is not installed."
+    echo "  Anti-Spoofing Protection will be unavailable."
+    echo "  Install with: $PIP install -r requirements.txt"
+fi
+
 mkdir -p "$ROOT_DIR/database" "$ROOT_DIR/results" "$ROOT_DIR/results/evaluation"
 
 if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then

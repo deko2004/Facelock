@@ -9,6 +9,7 @@ or:
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import sys
 
@@ -43,7 +44,28 @@ def _check_environment() -> int:
     print(f"Recognizer: {context.engine.recognizer_label}")
     print(f"Enrolled users: {context.database.count_users()}")
     print(f"Threshold: {context.threshold:.3f}")
-    print("Models loaded successfully.")
+    print("Core models loaded successfully.")
+    print(f"Anti-spoofing model: {settings.PAD_MODEL}")
+    if not settings.PAD_MODEL.is_file():
+        print("Anti-spoofing: optional model not found; OFF mode still works.")
+    elif importlib.util.find_spec("onnxruntime") is None:
+        print(
+            "Anti-spoofing: onnxruntime is not installed; OFF mode still works. "
+            "Install with: pip install -r requirements.txt"
+        )
+    else:
+        try:
+            context.anti_spoofing.enable()
+            detector = context.anti_spoofing.ensure_loaded()
+            width, height = detector.input_size
+            print(
+                f"Anti-spoofing: {settings.PAD_MODEL_LABEL} loaded "
+                f"({width}x{height}, 3 classes)."
+            )
+        except Exception as exc:
+            print(f"Anti-spoofing: model found but could not load: {exc}")
+        finally:
+            context.anti_spoofing.disable()
     context.shutdown()
     return 0
 
@@ -71,8 +93,9 @@ def main(argv: list[str] | None = None) -> int:
         context = AppContext.create()
     except Exception as exc:
         _show_fatal_error(
-            f"{exc}\n\nCheck that both ONNX models are present in the models/ "
-            "folder and that the virtual environment is working."
+            f"{exc}\n\nCheck that the YuNet and SFace ONNX models are present in "
+            "models/ and that the virtual environment is working. The optional "
+            "anti-spoofing model is only needed when PAD is enabled."
         )
         return 1
 

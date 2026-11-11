@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config import settings
+from core.anti_spoofing import AntiSpoofingService
 from core.camera_manager import CameraManager
 from core.database import FaceDatabase
 from core.enrollment import EnrollmentService
@@ -26,6 +27,7 @@ class AppContext:
     verification: VerificationService
     evaluation: EvaluationService
     camera: CameraManager
+    anti_spoofing: AntiSpoofingService
     threshold: float
     settings_path: Path | None
 
@@ -38,6 +40,7 @@ class AppContext:
         threshold: float | None = None,
         detector_path: Path | str | None = None,
         recognizer_path: Path | str | None = None,
+        pad_model_path: Path | str | None = None,
     ) -> "AppContext":
         settings.ensure_directories()
         cipher = TemplateCipher(key_path or settings.TEMPLATE_KEY_FILE)
@@ -54,6 +57,7 @@ class AppContext:
         verification = VerificationService(database, engine, matcher, threshold)
         evaluation = EvaluationService(engine)
         camera = CameraManager()
+        anti_spoofing = AntiSpoofingService(model_path=pad_model_path)
         return cls(
             engine=engine,
             database=database,
@@ -63,6 +67,7 @@ class AppContext:
             verification=verification,
             evaluation=evaluation,
             camera=camera,
+            anti_spoofing=anti_spoofing,
             threshold=threshold,
             settings_path=(
                 Path(settings_path)
@@ -83,3 +88,4 @@ class AppContext:
 
     def shutdown(self) -> None:
         self.camera.release()
+        self.anti_spoofing.close()
