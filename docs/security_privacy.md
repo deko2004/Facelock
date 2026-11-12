@@ -1,5 +1,9 @@
 # Security and privacy
 
+> For a consolidated Arabic reference on the optional anti-spoofing protection,
+> its guarantees and remaining attack surface, see
+> [anti_spoofing_summary.md](anti_spoofing_summary.md).
+
 ## Scope
 
 This document describes the security properties of the academic demonstration in

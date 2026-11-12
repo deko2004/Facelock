@@ -191,6 +191,7 @@ docs/         الإعداد والاستخدام والبنية والأمان 
 - [الاستخدام](docs/usage.md)
 - [البنية](docs/architecture.md)
 - [الأمان والخصوصية](docs/security_privacy.md)
+- [ملخص الحماية من التزييف PAD](docs/anti_spoofing_summary.md)
 - [التقييم](docs/evaluation.md)
 - [اختيار الأدوات وتحليل Facelock](docs/tool_selection.md)
 - [الاختبارات](docs/testing.md)

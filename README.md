@@ -240,6 +240,7 @@ docs/         Setup, usage, architecture, security, evaluation and tool selectio
 - [Usage](docs/usage.md)
 - [Architecture](docs/architecture.md)
 - [Security and privacy](docs/security_privacy.md)
+- [Anti-spoofing protection summary (Arabic)](docs/anti_spoofing_summary.md)
 - [Evaluation](docs/evaluation.md)
 - [Tool selection and Facelock analysis](docs/tool_selection.md)
 - [Testing](docs/testing.md)
