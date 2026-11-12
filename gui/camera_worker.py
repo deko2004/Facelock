@@ -11,6 +11,14 @@ import cv2
 import numpy as np
 
 from config import settings
+from core.active_liveness import (
+    LIVENESS_FAILED,
+    LIVENESS_NOT_RUN,
+    LIVENESS_PASSED,
+    LIVENESS_PENDING,
+    ActiveLivenessService,
+    LivenessAssessment,
+)
 from core.anti_spoofing import (
     PAD_ANALYZING,
     PAD_DISABLED,
@@ -18,6 +26,7 @@ from core.anti_spoofing import (
     PAD_LIVE,
     PAD_LOADING,
     PAD_NO_FACE,
+    PAD_NOT_RUN,
     PAD_SPOOF,
     PAD_UNCERTAIN,
     AntiSpoofingError,
@@ -31,8 +40,34 @@ from core.camera_manager import CameraError, CameraManager
 from core.diagnostics import PerformanceMonitor, PerformanceSnapshot
 from core.face_engine import FaceDetection, FaceEngine, FaceEngineError
 from core.frame_buffer import LatestFrameBuffer
+from core.frame_source import (
+    SOURCE_UNKNOWN,
+    FrameSource,
+    FrameSourceEnded,
+    FrameSourceError,
+    PhysicalCameraSource,
+)
 from core.image_processor import draw_faces, draw_pad_status
 from core.matcher import EnrolledIdentity, Identification, identify
+from core.protection import (
+    FINAL_ACCEPTED,
+    FINAL_NOT_RUN,
+    FINAL_REJECTED,
+    LAYER_ACTIVE_LIVENESS,
+    LAYER_IDENTITY,
+    LAYER_NONE,
+    LAYER_PASSIVE_PAD,
+    LAYER_SOURCE_INTEGRITY,
+    ProtectionConfig,
+)
+from core.source_integrity import (
+    SOURCE_NOT_RUN,
+    SOURCE_REJECTED,
+    SOURCE_TRUSTED,
+    CameraSourceIntegrityService,
+    SourceAssessment,
+    SourceSession,
+)
 
 
 def _bbox_iou(
@@ -82,11 +117,55 @@ class LiveFrameResult:
     pad_spoof: bool = False
     pad_live_streak: int = 0
     pad_required_frames: int = 0
+    source_kind: str = SOURCE_UNKNOWN
+    source_label: str = "Unknown"
+    source_identity: str = ""
+    source_integrity_status: str = SOURCE_NOT_RUN
+    source_integrity_reason: str = ""
+    source_integrity_ran: bool = False
+    source_changed: bool = False
+    liveness_status: str = LIVENESS_NOT_RUN
+    liveness_challenge: str | None = None
+    liveness_challenge_label: str = ""
+    liveness_message: str = ""
+    liveness_progress: int = 0
+    liveness_required_frames: int = 0
+    liveness_remaining_seconds: float | None = None
+    liveness_ran: bool = False
+    passive_pad_ran: bool = False
+    identity_executed: bool = False
+    protection_mode: str = "Original / Vulnerable"
+    final_decision: str = FINAL_NOT_RUN
+    decision_reason: str = ""
+    layer_detected: str = LAYER_NONE
+    processing_ms: float = 0.0
     diagnostics: PerformanceSnapshot | None = None
 
     @property
     def recognized_count(self) -> int:
         return sum(1 for identification in self.identifications if identification.matched)
+
+    @property
+    def source_status_label(self) -> str:
+        return {
+            "NOT_RUN": "Not Run",
+            "TRUSTED": "Trusted",
+            "REJECTED": "Rejected",
+            "UNCERTAIN": "Uncertain",
+        }.get(self.source_integrity_status, self.source_integrity_status)
+
+    @property
+    def liveness_status_label(self) -> str:
+        return {
+            "NOT_RUN": "Not Run",
+            "PENDING": "Pending",
+            "PASSED": "Passed",
+            "FAILED": "Failed",
+            "EXPIRED": "Expired",
+            "TRACKING_LOST": "Tracking Lost",
+            "FACE_CHANGED": "Face Changed",
+            "ERROR": "Error",
+        }.get(self.liveness_status, self.liveness_status)
 
 
 class LiveCameraWorker(threading.Thread):
@@ -109,6 +188,11 @@ class LiveCameraWorker(threading.Thread):
         pad_runtime: PadRuntime | None = None,
         detection_interval: int | None = None,
         recognition_interval: int | None = None,
+        frame_source: FrameSource | None = None,
+        source_integrity: CameraSourceIntegrityService | None = None,
+        source_session: SourceSession | None = None,
+        liveness: ActiveLivenessService | None = None,
+        protection: ProtectionConfig | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.engine = engine
@@ -117,7 +201,16 @@ class LiveCameraWorker(threading.Thread):
         self.user_id = user_id
         self.threshold = float(threshold)
         self.identities = list(identities or [])
-        self.camera = camera_manager or CameraManager()
+        self.camera = camera_manager or (
+            None if frame_source is not None else CameraManager()
+        )
+        self.source = frame_source or PhysicalCameraSource(
+            self.camera or CameraManager(), self.camera_index
+        )
+        self.source_integrity = source_integrity
+        self.source_session = source_session
+        self.liveness = liveness
+        self.protection = protection or ProtectionConfig()
         self.pad_runtime = pad_runtime
         self.detection_interval = max(
             1,
@@ -163,6 +256,11 @@ class LiveCameraWorker(threading.Thread):
         self._last_pad_prediction: PadPrediction | None = None
         self._pad_was_enabled = False
         self._pad_detector_id: int | None = None
+        self._last_source_assessment: SourceAssessment | None = None
+        self._last_liveness_assessment: LivenessAssessment | None = None
+        self._last_pad_assessment: PadAssessment | None = None
+        self._identity_executed = False
+        self._passive_pad_ran = False
 
     @property
     def stopping(self) -> bool:
@@ -171,7 +269,7 @@ class LiveCameraWorker(threading.Thread):
     def stop(self) -> None:
         self._stop_event.set()
         self._frames.close()
-        self.camera.release()
+        self.source.release()
 
     def _publish(self, result: LiveFrameResult) -> None:
         try:
@@ -186,8 +284,16 @@ class LiveCameraWorker(threading.Thread):
     def _capture_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                frame = self.camera.read()
-            except CameraError as exc:
+                frame = self.source.read()
+            except FrameSourceEnded as exc:
+                if not self._stop_event.is_set():
+                    self._publish(
+                        LiveFrameResult(error=str(exc), final_decision=FINAL_REJECTED)
+                    )
+                self._stop_event.set()
+                self._frames.close()
+                return
+            except (CameraError, FrameSourceError) as exc:
                 if not self._stop_event.is_set():
                     self._publish(LiveFrameResult(error=str(exc)))
                 self._stop_event.set()
@@ -303,11 +409,40 @@ class LiveCameraWorker(threading.Thread):
                 self._pad_was_enabled = pad_active
                 self._pad_detector_id = detector_id
 
-            if snapshot is not None and snapshot.enabled:
-                result = self._analyze_protected(frame, detections, snapshot)
+            source_assessment = self._evaluate_source()
+            if (
+                self.protection.source_integrity_enabled
+                and not source_assessment.trusted
+            ):
+                liveness_assessment = self._not_run_liveness(
+                    "Active liveness was not reached because source integrity failed."
+                )
+                result = self._blocked_source_result(
+                    frame, detections, source_assessment, snapshot
+                )
             else:
-                result = self._analyze_unprotected(frame, detections)
-            self._monitor.record_process((time.perf_counter() - started) * 1000.0)
+                liveness_assessment = self._evaluate_liveness(
+                    detections, frame.shape
+                )
+                if (
+                    self.protection.active_liveness_enabled
+                    and not liveness_assessment.passed
+                ):
+                    result = self._blocked_liveness_result(
+                        frame, detections, liveness_assessment, snapshot
+                    )
+                elif snapshot is not None and snapshot.enabled:
+                    result = self._analyze_protected(frame, detections, snapshot)
+                else:
+                    result = self._analyze_unprotected(frame, detections)
+
+            self._apply_protection_context(
+                result, source_assessment, liveness_assessment
+            )
+            self._finalize_result(result)
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            self._monitor.record_process(elapsed_ms)
+            result.processing_ms = elapsed_ms
             result.diagnostics = self._monitor.snapshot(
                 self._fps, self._process_fps, self._frames.dropped
             )
@@ -316,7 +451,7 @@ class LiveCameraWorker(threading.Thread):
     def run(self) -> None:
         capture_thread: threading.Thread | None = None
         try:
-            self.camera.open(self.camera_index)
+            self.source.open()
             capture_thread = threading.Thread(
                 target=self._capture_loop,
                 name="camera-capture",
@@ -325,7 +460,7 @@ class LiveCameraWorker(threading.Thread):
             self._capture_thread = capture_thread
             capture_thread.start()
             self._process_loop()
-        except CameraError as exc:
+        except (CameraError, FrameSourceError) as exc:
             if not self._stop_event.is_set():
                 self._publish(LiveFrameResult(error=str(exc)))
         except FaceEngineError as exc:
@@ -339,8 +474,259 @@ class LiveCameraWorker(threading.Thread):
             self._frames.close()
             if capture_thread is not None and capture_thread.is_alive():
                 capture_thread.join(timeout=1.0)
-            self.camera.release()
+            self.source.release()
             self._publish(LiveFrameResult(finished=True))
+
+    def _evaluate_source(self) -> SourceAssessment:
+        info = self.source.info
+        if self.source_integrity is None:
+            if self.protection.source_integrity_enabled:
+                return SourceAssessment(
+                    SOURCE_REJECTED,
+                    False,
+                    info.kind,
+                    info.kind_label,
+                    "Source integrity is enabled but the service is unavailable.",
+                    info.identifier,
+                )
+            return SourceAssessment(
+                SOURCE_NOT_RUN,
+                False,
+                info.kind,
+                info.kind_label,
+                "Source integrity protection is off. This source is not trusted.",
+                info.identifier,
+                policy_applied=False,
+            )
+        return self.source_integrity.evaluate(
+            info,
+            self.source_session,
+            enabled=self.protection.source_integrity_enabled,
+        )
+
+    def _not_run_liveness(self, message: str) -> LivenessAssessment:
+        return LivenessAssessment(
+            LIVENESS_NOT_RUN,
+            False,
+            False,
+            None,
+            "Not issued",
+            None,
+            None,
+            None,
+            0,
+            settings.LIVENESS_REQUIRED_FRAMES,
+            message=message,
+        )
+
+    def _evaluate_liveness(
+        self,
+        detections: list[FaceDetection],
+        frame_shape: tuple[int, ...],
+    ) -> LivenessAssessment:
+        if not self.protection.active_liveness_enabled:
+            return LivenessAssessment(
+                LIVENESS_NOT_RUN,
+                False,
+                False,
+                None,
+                "Not issued",
+                None,
+                None,
+                None,
+                0,
+                settings.LIVENESS_REQUIRED_FRAMES,
+                message="Active liveness protection is off.",
+            )
+        if self.liveness is None:
+            return LivenessAssessment(
+                LIVENESS_FAILED,
+                False,
+                True,
+                None,
+                "Not issued",
+                None,
+                None,
+                None,
+                0,
+                settings.LIVENESS_REQUIRED_FRAMES,
+                message="Active liveness is enabled but the service is unavailable.",
+            )
+        return self.liveness.observe(detections, frame_shape)
+
+    def _blocked_source_result(
+        self,
+        frame: np.ndarray,
+        detections: list[FaceDetection],
+        assessment: SourceAssessment,
+        snapshot: PadSnapshot | None,
+    ) -> LiveFrameResult:
+        message = f"SOURCE REJECTED: {assessment.reason}"
+        return self._gate_result(
+            frame,
+            detections,
+            message,
+            PAD_ERROR,
+            snapshot,
+            final_decision=FINAL_REJECTED,
+            decision_reason=assessment.reason,
+            layer=LAYER_SOURCE_INTEGRITY,
+        )
+
+    def _blocked_liveness_result(
+        self,
+        frame: np.ndarray,
+        detections: list[FaceDetection],
+        assessment: LivenessAssessment,
+        snapshot: PadSnapshot | None,
+    ) -> LiveFrameResult:
+        pending = assessment.status in {LIVENESS_PENDING, LIVENESS_NOT_RUN}
+        final = FINAL_NOT_RUN if pending else FINAL_REJECTED
+        status = PAD_ANALYZING if pending else PAD_ERROR
+        message = f"ACTIVE LIVENESS: {assessment.message}"
+        return self._gate_result(
+            frame,
+            detections,
+            message,
+            status,
+            snapshot,
+            final_decision=final,
+            decision_reason=assessment.message,
+            layer=LAYER_ACTIVE_LIVENESS,
+        )
+
+    def _gate_result(
+        self,
+        frame: np.ndarray,
+        detections: list[FaceDetection],
+        message: str,
+        draw_status: str,
+        snapshot: PadSnapshot | None,
+        final_decision: str,
+        decision_reason: str,
+        layer: str,
+    ) -> LiveFrameResult:
+        self._feature_cache.clear()
+        primary = self.engine.largest_face(detections)
+        identifications = [
+            Identification(None, None, None, False) for _ in detections
+        ]
+        labels = ["" for _ in detections]
+        if primary is not None:
+            labels[primary.index] = message.split(":", 1)[0]
+        annotated = draw_faces(
+            frame,
+            detections,
+            selected_index=primary.index if primary is not None else None,
+            labels=labels,
+        )
+        annotated = draw_pad_status(annotated, message, draw_status)
+        pad_enabled = snapshot is not None and snapshot.enabled
+        return LiveFrameResult(
+            raw_frame=frame,
+            annotated_frame=annotated,
+            detections=detections,
+            identifications=identifications,
+            labels=labels,
+            similarity=None,
+            verified=(
+                False
+                if final_decision == FINAL_REJECTED and self.template is not None
+                else None
+            ),
+            user_id=self.user_id,
+            fps=self._fps,
+            pad_enabled=pad_enabled,
+            pad_status=PAD_NOT_RUN,
+            pad_message="Passive PAD was not reached." if pad_enabled else "Protection is off.",
+            pad_verified=False,
+            pad_spoof=False,
+            final_decision=final_decision,
+            decision_reason=decision_reason,
+            layer_detected=layer,
+        )
+
+    def _apply_protection_context(
+        self,
+        result: LiveFrameResult,
+        source: SourceAssessment,
+        liveness: LivenessAssessment,
+    ) -> None:
+        result.source_kind = source.kind
+        result.source_label = source.kind_label
+        result.source_identity = source.identity
+        result.source_integrity_status = source.status
+        result.source_integrity_reason = source.reason
+        result.source_integrity_ran = (
+            self.protection.source_integrity_enabled
+            and self.source_integrity is not None
+        )
+        result.source_changed = source.source_changed
+        result.liveness_status = liveness.status
+        result.liveness_challenge = liveness.challenge
+        result.liveness_challenge_label = liveness.challenge_label
+        result.liveness_message = liveness.message
+        result.liveness_progress = liveness.progress
+        result.liveness_required_frames = liveness.required_frames
+        result.liveness_remaining_seconds = liveness.remaining_seconds
+        result.liveness_ran = (
+            self.protection.active_liveness_enabled
+            and self.liveness is not None
+            and not (
+                self.protection.source_integrity_enabled
+                and not source.trusted
+            )
+        )
+        result.protection_mode = self.protection.label
+
+    def _finalize_result(self, result: LiveFrameResult) -> None:
+        if result.error is not None:
+            result.final_decision = FINAL_REJECTED
+            result.decision_reason = result.error
+            result.layer_detected = result.layer_detected or LAYER_NONE
+            return
+        if result.final_decision != FINAL_NOT_RUN:
+            return
+        if result.source_integrity_ran and result.source_integrity_status != SOURCE_TRUSTED:
+            result.final_decision = FINAL_REJECTED
+            result.decision_reason = result.source_integrity_reason
+            result.layer_detected = LAYER_SOURCE_INTEGRITY
+            return
+        if result.liveness_ran and result.liveness_status != LIVENESS_PASSED:
+            if result.liveness_status in {LIVENESS_PENDING, LIVENESS_NOT_RUN}:
+                result.final_decision = FINAL_NOT_RUN
+            else:
+                result.final_decision = FINAL_REJECTED
+            result.decision_reason = result.liveness_message
+            result.layer_detected = LAYER_ACTIVE_LIVENESS
+            return
+        if result.pad_enabled and result.pad_status != PAD_LIVE:
+            if result.pad_status in {PAD_ANALYZING, PAD_LOADING, PAD_NO_FACE}:
+                result.final_decision = FINAL_NOT_RUN
+            else:
+                result.final_decision = FINAL_REJECTED
+            result.decision_reason = result.pad_message
+            result.layer_detected = LAYER_PASSIVE_PAD
+            return
+        if result.identity_executed:
+            identified = result.verified is True or (
+                self.template is None and result.recognized_count > 0
+            )
+            if identified:
+                result.final_decision = FINAL_ACCEPTED
+                result.decision_reason = "Face identity matched the enrolled template."
+                result.layer_detected = LAYER_NONE
+            else:
+                result.final_decision = FINAL_REJECTED
+                result.decision_reason = "Face identity did not match the enrolled template."
+                result.layer_detected = LAYER_IDENTITY
+            return
+        if result.detections and (
+            self.template is not None or self.identities
+        ):
+            result.final_decision = FINAL_REJECTED
+            result.decision_reason = "Identity verification could not be completed."
+            result.layer_detected = LAYER_IDENTITY
 
     def _analyze_unprotected(
         self, frame: np.ndarray, detections: list[FaceDetection]
@@ -451,6 +837,8 @@ class LiveCameraWorker(threading.Thread):
             pad_enabled=False,
             pad_status=PAD_DISABLED,
             pad_message="Protection is off.",
+            passive_pad_ran=False,
+            identity_executed=bool(features),
         )
 
     def _analyze_protected(
@@ -556,6 +944,8 @@ class LiveCameraWorker(threading.Thread):
             pad_spoof=assessment.spoof_detected,
             pad_live_streak=assessment.live_streak,
             pad_required_frames=assessment.required_live_frames,
+            passive_pad_ran=True,
+            identity_executed=False,
         )
 
     def _live_pad_result(
@@ -662,6 +1052,11 @@ class LiveCameraWorker(threading.Thread):
             pad_spoof=False,
             pad_live_streak=assessment.live_streak,
             pad_required_frames=assessment.required_live_frames,
+            passive_pad_ran=True,
+            identity_executed=(
+                feature is not None
+                and bool(self.identities or self.template is not None)
+            ),
         )
 
     @staticmethod

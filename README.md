@@ -32,6 +32,9 @@ Tkinter interface, encrypted template storage and an honest evaluation pipeline.
 - **Evaluation**: compute genuine/impostor pairs, FAR/FRR, accuracy and a
   threshold sweep from `dataset/<identity>/<images>`, then export CSV and a PNG
   chart.
+- **Video Injection Attack Lab**: replay a recorded video through the real
+  YuNet/SFace/PAD pipeline and compare the original configuration with source
+  integrity, active liveness and passive PAD.
 - **Security page**: privacy/threat-model explanation plus a controlled
   static-photo spoofing demonstration.
 - **About page**: objectives, technology, model notes, Facelock analysis and
@@ -102,11 +105,16 @@ contract and Apache-2.0 attribution.
    before SFace identity verification. The toggle takes effect without restarting
    the camera. If the model or `onnxruntime` is unavailable, the toggle shows an
    explicit error and authentication is blocked while it remains on.
-4. Open **Compare Images** for a direct two-photo comparison that does not require
+4. Open **Academic -> Video Injection Lab** to replay a recorded video through the
+   real authentication pipeline. Compare Original / Vulnerable, Full Protection
+   and Liveness Simulation modes. Full Protection rejects the recorded source
+   before identity verification; Liveness Simulation exercises active liveness
+   separately and is explicitly labelled as untrusted.
+5. Open **Compare Images** for a direct two-photo comparison that does not require
    enrolment.
-5. Use **Database** to review or delete enrolled users. Deletion removes the
+6. Use **Database** to review or delete enrolled users. Deletion removes the
    encrypted template and writes an audit event.
-6. Use **Evaluation** with a folder arranged as
+7. Use **Evaluation** with a folder arranged as
    `dataset/<identity>/<image files>`.
 
 The default threshold is `0.363`, OpenCV's published SFace cosine reference for
@@ -205,16 +213,17 @@ The full threat model is in
 venv/bin/python -m pytest
 ```
 
-Current result: **117 passed**. The suite covers model loading and detection,
+Current result: **143 passed**. The suite covers model loading and detection,
 quality checks, matching math, 1:N identification labels, encryption, database
 behaviour, enrolment, verification, evaluation, camera lifecycle with mocked
 captures, latest-frame buffering, performance diagnostics, worker scheduling and
 caching, settings, PAD preprocessing/class mapping, temporal PAD decisions,
-PAD-blocked camera results and a GUI page-construction smoke test. The PAD
-effectiveness tests use the official Silent-Face genuine/attack samples and a
-synthetic screen-replay sample. The GUI smoke test is skipped automatically when
-no graphical display is available; no physical webcam is required for the test
-suite.
+PAD-blocked camera results, recorded-video frame sources, source-integrity
+session binding, active-liveness challenge-response and a GUI page-construction
+smoke test. The PAD effectiveness tests use the official Silent-Face genuine/attack
+samples and a synthetic screen-replay sample. The GUI smoke test is skipped
+automatically when no graphical display is available; no physical webcam is
+required for the test suite.
 
 ## Project layout
 
@@ -240,6 +249,7 @@ docs/         Setup, usage, architecture, security, evaluation and tool selectio
 - [Usage](docs/usage.md)
 - [Architecture](docs/architecture.md)
 - [Security and privacy](docs/security_privacy.md)
+- [Video Injection Attack Lab](docs/video_injection_lab.md)
 - [Anti-spoofing protection summary (Arabic)](docs/anti_spoofing_summary.md)
 - [Evaluation](docs/evaluation.md)
 - [Tool selection and Facelock analysis](docs/tool_selection.md)
@@ -250,6 +260,10 @@ docs/         Setup, usage, architecture, security, evaluation and tool selectio
 - Anti-spoofing is optional and is not a guarantee against all presentation
   attacks. The default PAD thresholds are not calibrated for every camera,
   printer or display; determined attackers may still succeed.
+- Video-injection source checks are application-level heuristics, not
+  cryptographic camera authentication. OS-level frame injection, malicious
+  drivers and virtual cameras can bypass them. Active liveness is a
+  landmark-based challenge-response demo, not certified liveness detection.
 - No demographic bias evaluation; the sample set is far too small and not
   representative.
 - The threshold is not calibrated on a validation set.

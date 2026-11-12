@@ -10,7 +10,7 @@ venv/bin/python -m pytest
 Observed result:
 
 ```text
-117 passed (about 15s on the development machine)
+143 passed (about 9s on the development machine)
 ```
 
 The suite does not require a physical webcam. It uses temporary databases, keys
@@ -29,6 +29,10 @@ and images, so it does not modify the real `database/` or `results/` folders.
 | Verification | Same person, different person, unknown user, no face, deletion, shared threshold update |
 | Evaluation | Confusion matrix, FAR/FRR/accuracy/precision/recall, missing/empty dataset, demo dataset, no-genuine-pair case, CSV and chart export |
 | PAD | ONNX input/output contract, raw `0..255` preprocessing, official genuine/fake samples, synthetic screen replay, temporal evidence/reset, service load/error paths, worker blocking and SFace-after-live |
+| Frame source | Recorded-video decoding, looping, restart, progress, invalid/missing files, metadata mapping |
+| Source integrity | Recorded/physical/virtual/unknown classification, fail-closed policy, session binding, source-change invalidation, audit events |
+| Active liveness | Baseline after issuance, temporal movement, wrong-direction rejection, timeout, no-face, multiple-face, low confidence, face change and reset |
+| Video injection | Recorded frames through the real worker; unprotected acceptance; source-integrity rejection before identity; liveness blocking/pending/pass paths |
 | Camera | Device enumeration shape, read-before-open error, open failure, mocked open/read/release, buffer-size property, deferred release during a blocking read, probe success/failure, worker name labels |
 | Performance | Latest-frame replacement/drop counting, diagnostics summary/CPU-RSS sampling, detection/recognition cadence, feature-cache reuse/invalidation, lifecycle stop/join |
 | Settings | Threshold clamp, save/load, invalid/missing settings fallback |
@@ -98,6 +102,22 @@ The sample assets are in `tests/assets/anti_spoofing/` and are attributed to the
 upstream Apache-2.0 project. This is an effectiveness smoke test on a few images,
 not a PAD benchmark or a calibration dataset.
 
+## Video injection tests
+
+`tests/test_video_injection_integration.py` generates a temporary AVI and feeds it
+through `LiveCameraWorker` with fake engines and real frame-source, source
+integrity and active-liveness services. It verifies:
+
+- a recorded replay can be accepted when protections are off;
+- source integrity rejects the recorded source before identity verification;
+- multiple faces fail active liveness before identity;
+- a pending liveness challenge keeps identity blocked;
+- a satisfied challenge allows the identity path to run.
+
+No physical webcam is required. The tests do not prove real-world PAD or liveness
+effectiveness; they prove that the gate order and fail-closed decisions are wired
+into the actual worker.
+
 ## Manual checks
 
 The automated suite cannot replace a manual GUI/camera check:
@@ -115,13 +135,20 @@ The automated suite cannot replace a manual GUI/camera check:
    result is `AUTH BLOCKED` or `SPOOF DETECTED` rather than verified.
 9. Toggle PAD OFF and confirm the original behaviour returns without restarting
    the camera.
-10. Delete the test user and confirm the count decreases.
-11. Run the evaluation page on `images/eval_demo`.
+10. Open **Video Injection Lab**, choose a recorded video of the enrolled test
+    user and run Original / Vulnerable, Full Protection and Liveness Simulation.
+    Confirm that Full Protection reports `Source Integrity` and does not run
+    identity, while Liveness Simulation exercises the active-liveness layer.
+11. Delete the test user and confirm the count decreases.
+12. Run the evaluation page on `images/eval_demo`.
 
 ## Known test limitations
 
 - The camera tests use a fake `cv2.VideoCapture`; they do not validate a real
-  device driver.
+  device driver. Recorded-video tests use generated AVI files and fake engines.
+- Source-integrity tests exercise metadata policy, not kernel/driver or
+  virtual-camera bypasses. Active-liveness tests use synthetic landmarks, not a
+  calibrated head-pose dataset.
 - The GUI test constructs pages but does not automate every button path.
 - PAD tests use a few official samples and a synthetic screen replay; they are
   not a representative PAD benchmark, and thresholds are not calibrated.

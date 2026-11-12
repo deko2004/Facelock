@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from config import settings
+from core.active_liveness import ActiveLivenessService
 from core.anti_spoofing import AntiSpoofingService
 from core.camera_manager import CameraManager
 from core.database import FaceDatabase
@@ -14,6 +15,7 @@ from core.evaluation import EvaluationService
 from core.face_engine import FaceEngine
 from core.matcher import FaceMatcher
 from core.security import TemplateCipher
+from core.source_integrity import CameraSourceIntegrityService
 from core.verification import VerificationService
 
 
@@ -28,6 +30,8 @@ class AppContext:
     evaluation: EvaluationService
     camera: CameraManager
     anti_spoofing: AntiSpoofingService
+    source_integrity: CameraSourceIntegrityService
+    active_liveness: ActiveLivenessService
     threshold: float
     settings_path: Path | None
 
@@ -58,6 +62,8 @@ class AppContext:
         evaluation = EvaluationService(engine)
         camera = CameraManager()
         anti_spoofing = AntiSpoofingService(model_path=pad_model_path)
+        source_integrity = CameraSourceIntegrityService(audit=database.log_event)
+        active_liveness = ActiveLivenessService(audit=database.log_event)
         return cls(
             engine=engine,
             database=database,
@@ -68,6 +74,8 @@ class AppContext:
             evaluation=evaluation,
             camera=camera,
             anti_spoofing=anti_spoofing,
+            source_integrity=source_integrity,
+            active_liveness=active_liveness,
             threshold=threshold,
             settings_path=(
                 Path(settings_path)
@@ -89,3 +97,4 @@ class AppContext:
     def shutdown(self) -> None:
         self.camera.release()
         self.anti_spoofing.close()
+        self.active_liveness.close()

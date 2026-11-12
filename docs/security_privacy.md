@@ -52,10 +52,42 @@ The Live Camera page can enable MiniFASNetV2 before SFace. When enabled:
   authentication remains blocked while protection is ON.
 
 This is fail-closed for the Live Camera workflow, but it is a demonstration
-classifier, not a certified PAD system. It does not provide challenge-response,
-depth sensing or a guarantee against masks, replay, deepfakes or novel attacks.
-The default thresholds and frame counts are not calibrated on a representative
-attack corpus.
+classifier, not a certified PAD system. It does not provide depth sensing or a
+guarantee against masks, replay, deepfakes or novel attacks. The Video Injection
+Lab adds optional source-integrity and landmark-based active-liveness gates, but
+these are also demonstrations and are not certified liveness detection. The
+default thresholds and frame counts are not calibrated on a representative attack
+corpus.
+
+### Video-injection and source integrity
+
+The Video Injection Lab adds two optional gates before the existing PAD and
+identity path:
+
+- **Source integrity** classifies the frame origin and binds it to one session.
+  Recorded files, virtual-camera indicators, unsupported topology and unbound
+  sessions fail closed when the gate is enabled. A source-identity change during
+  the session invalidates the session. On Linux, metadata comes from
+  `/sys/class/video4linux/videoN` and the resolved device path; `/dev/video0` is
+  not trusted by name alone.
+- **Active liveness** issues a random head-movement challenge
+  (`TURN_HEAD_LEFT`, `TURN_HEAD_RIGHT`, `LOOK_UP`, `LOOK_DOWN`) using YuNet
+  landmarks. It records a baseline after issuance and requires consecutive
+  movement frames within a timeout. Missing/multiple faces, low confidence,
+  invalid landmarks, face changes and expiry block authentication.
+
+The gate order is source integrity -> active liveness -> passive PAD -> identity.
+A failed gate records the detecting layer, and identity verification does not run
+before the enabled gates pass.
+
+These controls are demonstrations, not cryptographic guarantees. Source
+integrity is an application-level metadata check; an attacker with OS, driver,
+virtual-camera or process-memory control can bypass it. Active liveness can be
+satisfied by a recording that happens to perform the requested movement, and its
+thresholds are not calibrated across cameras, lighting, glasses, head coverings
+or user mobility. The lab's **Full Protection** mode normally rejects a recorded
+file at the source gate, so **Liveness Simulation** is used to exercise active
+liveness separately; that mode is explicitly labelled untrusted/simulation.
 
 ### Encryption at rest
 
@@ -115,9 +147,11 @@ With the Live Camera toggle ON, MiniFASNetV2 attempts to detect presentation
 attacks before SFace. This raises the bar for simple printed-photo and
 screen-replay attacks, but it is not certified and can be bypassed. It does not
 cover every attack type, camera, display, printer or lighting condition, and the
-default thresholds are not calibrated. The Security & Privacy page's static-image
-demonstration bypasses the Live Camera PAD path, so it still illustrates why
-recognition alone is not liveness.
+default thresholds are not calibrated. The Video Injection Lab can additionally
+reject recorded sources and run a head-movement challenge, but neither control is
+cryptographic camera authentication or certified liveness. The Security &
+Privacy page's static-image demonstration bypasses the Live Camera PAD path, so it
+still illustrates why recognition alone is not liveness.
 
 A production system would need a certified PAD component, challenge-response,
 depth sensing or a combination of controls, plus a realistic PAD evaluation on
@@ -164,8 +198,11 @@ application does not defend against a compromised desktop session.
 
 ### Camera trust
 
-The camera path assumes the operating system and device are trustworthy. A
-malicious virtual camera or injected frames are outside the threat model.
+The camera path assumes the operating system and device are trustworthy. The
+Video Injection Lab's source-integrity gate rejects obvious recorded and virtual
+sources, but a malicious virtual camera, kernel driver, OS-level frame injection
+or process-memory attacker can bypass it. Cryptographic camera authenticity is
+outside the threat model.
 
 ## Attack scenarios
 
@@ -174,7 +211,7 @@ malicious virtual camera or injected frames are outside the threat model.
 | Copy `biometric.db` without the key | Templates are unreadable | Fernet encryption | Key may be copied too |
 | Read the whole project directory | Templates and key available | File permissions only | Same-user malware wins |
 | Present a printed photo | Matcher may accept | Optional MiniFASNetV2 on Live Camera | High when PAD OFF; reduced but not eliminated when ON |
-| Replay a video | Matcher may accept | Optional MiniFASNetV2 on Live Camera | High when PAD OFF; reduced but not eliminated when ON |
+| Replay a video | Matcher may accept | Optional MiniFASNetV2 on Live Camera; Video Injection Lab source integrity and active liveness | High when protections are OFF; reduced but not eliminated when ON |
 | Guess a user ID | Reveals enrolment metadata | IDs are not secrets | Enumeration possible |
 | Tamper with a template | Decryption/authentication fails | Fernet HMAC | Denial of service |
 | Delete a user without authorisation | Enrolment removed | OS account boundary | No app-level roles |

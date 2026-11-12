@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - exercised only on minimal installs
 
 
 PAD_DISABLED = "DISABLED"
+PAD_NOT_RUN = "NOT_RUN"
 PAD_READY = "READY"
 PAD_LOADING = "LOADING"
 PAD_ERROR = "ERROR"

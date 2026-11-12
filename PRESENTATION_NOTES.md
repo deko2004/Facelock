@@ -12,8 +12,8 @@
 > **Files used:** `README.md`, `README.ar.md`, `docs/setup.md`,
 > `docs/usage.md`, `docs/architecture.md`, `docs/security_privacy.md`,
 > `docs/evaluation.md`, `docs/testing.md`, `docs/tool_selection.md`,
-> `docs/anti_spoofing_summary.md`, `docs/ar/README.md`,
-> `models/anti_spoofing/README.md`,
+> `docs/anti_spoofing_summary.md`, `docs/video_injection_lab.md`,
+> `docs/ar/README.md`, `models/anti_spoofing/README.md`,
 > `tests/assets/anti_spoofing/README.md`, plus `requirements.txt` only to
 > confirm dependency names/versions.
 
@@ -26,9 +26,12 @@ The project is a **local-only desktop demonstration** of face recognition and
 project** on Biometric Authentication (`README.md`). It detects faces, extracts
 face embeddings, compares them with a configurable cosine-similarity threshold,
 and can optionally run a presentation-attack (anti-spoofing) check on the Live
-Camera page (`README.md`, `docs/architecture.md`). It includes enrolment,
-encrypted template storage, a user database, and an evaluation pipeline that
-computes FAR/FRR (`README.md`, `docs/evaluation.md`).
+Camera page (`README.md`, `docs/architecture.md`). A **Video Injection Attack
+Lab** also replays a recorded video through the same detection, recognition and
+PAD pipeline, with optional source-integrity and active-liveness gates
+(`docs/video_injection_lab.md`, `README.md`). It includes enrolment, encrypted
+template storage, a user database, and an evaluation pipeline that computes
+FAR/FRR (`README.md`, `docs/evaluation.md`).
 
 The authors explicitly state it is **academic demonstration only** and **not a
 production identity system**: no certified bias evaluation, no hardware-backed
@@ -50,7 +53,10 @@ not real access control (`README.md`, `docs/security_privacy.md`).
 | Face detection | **OpenCV YuNet** `face_detection_yunet_2023mar.onnx` (OpenCV Zoo) | Detect face bounding boxes/landmarks | `README.md`, `docs/setup.md` |
 | Face recognition / embeddings | **OpenCV SFace** `face_recognition_sface_2021dec.onnx`, **128-dimensional** embedding | Alignment (`alignCrop`) + feature extraction (`feature`) | `README.md`, `docs/architecture.md`, `docs/tool_selection.md` |
 | Matching | Explicit **cosine similarity** against a threshold | 1:1 verification and 1:N name labels | `docs/architecture.md`, `README.md` |
-| Anti-spoofing / PAD | **MiniFASNetV2** ONNX, run with `onnxruntime` 1.31.1 (requirements `>=1.16`) | Presentation-attack detection on Live Camera | `README.md`, `models/anti_spoofing/README.md`, `docs/setup.md` |
+| Anti-spoofing / PAD | **MiniFASNetV2** ONNX, run with `onnxruntime` 1.31.1 (requirements `>=1.16`) | Presentation-attack detection on Live Camera and, when enabled, the Video Injection Lab | `README.md`, `models/anti_spoofing/README.md`, `docs/setup.md`, `docs/video_injection_lab.md` |
+| Frame source | `CameraManager` adapter or OpenCV `VideoCapture` for a recorded file | Feed a physical camera or recorded video through the same worker | `docs/architecture.md`, `docs/video_injection_lab.md` |
+| Source integrity | Linux `/sys/class/video4linux/videoN` metadata + policy/session binding | Reject recorded, virtual or unknown sources when enabled | `docs/video_injection_lab.md`, `docs/security_privacy.md` |
+| Active liveness | YuNet five landmarks + randomized head-movement challenge | Lab-only challenge-response; not certified liveness | `docs/video_injection_lab.md`, `docs/security_privacy.md` |
 | Storage | **SQLite** database `database/biometric.db` | Users, encrypted templates, audit log | `docs/architecture.md`, `docs/security_privacy.md` |
 | Template encryption | **Fernet** (AES-128-CBC + HMAC-SHA256), key in `database/templates.key` | Encrypt embeddings at rest | `README.md`, `docs/security_privacy.md` |
 | Numerics / image handling | NumPy 2.5.4, Pillow 13.0.0 (listed tested versions) | Array math and image handling (Pillow's exact role is **غير موثّق في ملفات الـ docs**) | `docs/setup.md`, `requirements.txt` |
@@ -84,14 +90,22 @@ flowchart TD
     CTX --> FE[FaceEngine<br/>YuNet + SFace]
     CTX --> FM[FaceMatcher<br/>cosine + threshold]
     CTX --> AS[AntiSpoofingService<br/>MiniFASNetV2 PAD]
+    CTX --> SI[CameraSourceIntegrityService<br/>source policy + session]
+    CTX --> AL[ActiveLivenessService<br/>head-movement challenge]
     CTX --> EN[EnrollmentService]
     CTX --> VE[VerificationService]
     CTX --> EV[EvaluationService]
     CTX --> DB[FaceDatabase<br/>SQLite]
     DB --> CIPHER[TemplateCipher<br/>Fernet]
     CTX --> CAM[CameraManager<br/>OpenCV VideoCapture]
+    CTX --> FS[FrameSource<br/>physical camera or recorded video]
+    GUI --> LAB[VideoInjectionLabPage]
     GUI --> WORKER[LiveCameraWorker<br/>capture + processing threads]
+    LAB --> WORKER
+    WORKER --> FS
     WORKER --> FE
+    WORKER --> SI
+    WORKER --> AL
     WORKER --> AS
     WORKER --> FM
 ```
@@ -104,9 +118,13 @@ flowchart TD
 - Module responsibilities are listed in `docs/architecture.md`: `core/face_engine.py`
   (detect/embed), `core/matcher.py` (`MatchResult`, `decide`, `FaceMatcher`),
   `core/anti_spoofing.py` (PAD loading, preprocessing, tracker, runtime),
+  `core/frame_source.py` (physical/recorded source contract),
+  `core/source_integrity.py` (source policy/session binding),
+  `core/active_liveness.py` (landmark challenge-response),
+  `core/protection.py` (protection mode/decision constants),
   `core/security.py` (validation, permissions, Fernet), `core/database.py`,
   `core/enrollment.py`, `core/verification.py`, `core/evaluation.py`,
-  `core/camera_manager.py`, `gui/camera_worker.py`.
+  `core/camera_manager.py`, `gui/camera_worker.py`, `gui/video_injection_lab.py`.
 
 ### 3.2 Enrolment pipeline (`docs/architecture.md`)
 
@@ -163,34 +181,87 @@ label (`docs/usage.md`, `docs/anti_spoofing_summary.md`). Face changes are
 detected with bounding-box **IoU** and reset the temporal evidence
 (`docs/architecture.md`).
 
-### 3.5 Step-by-step: camera frame to final decision
+### 3.5 Video Injection Lab pipeline (`docs/video_injection_lab.md`, `docs/architecture.md`)
 
-1. **Capture thread** continuously reads frames into a capacity-1
-   `LatestFrameBuffer` (`docs/architecture.md`).
+```text
+recorded video file
+  -> RecordedVideoSource (OpenCV decode, pacing, loop/pause/replay)
+  -> LiveCameraWorker (same capture + processing threads)
+  -> YuNet detect
+  -> source integrity (optional, fail-closed)
+  -> active liveness (optional, fail-closed)
+  -> MiniFASNetV2 PAD (optional, fail-closed)
+  -> SFace identity verification
+  -> LiveFrameResult with source/liveness/PAD/identity metadata
+```
+
+The lab changes the **frame source** and the enabled protection gates, not the
+biometric model, threshold, database or matching code
+(`docs/video_injection_lab.md`). Without an explicit frame source, the worker
+wraps `CameraManager` in `PhysicalCameraSource`, preserving the Live Camera path
+(`docs/architecture.md`).
+
+The documented modes are (`docs/video_injection_lab.md`):
+
+| Mode | Source integrity | Active liveness | Passive PAD | Purpose |
+|---|---|---|---|---|
+| Original / Vulnerable | Off | Off | Off | Show that recognition alone can accept a replayed video |
+| Full Protection | On | On | On | Show the layered defense; a recorded file is rejected at the source gate |
+| Liveness Simulation | Off | On | Off | Exercise active liveness separately, labelled untrusted/simulation |
+| Custom | User choice | User choice | User choice | Explore combinations |
+
+The default gate order is source integrity → active liveness → passive PAD →
+SFace identity. A failed gate sets `final_decision=REJECTED`, records the
+detecting layer, and does not run identity verification
+(`docs/architecture.md`, `docs/video_injection_lab.md`).
+
+`CameraSourceIntegrityService` classifies the frame origin and binds it to one
+session. Recorded files, virtual-camera indicators, unsupported topology and
+unbound sessions fail closed when enabled; a source-identity change invalidates
+the session. On Linux, metadata comes from
+`/sys/class/video4linux/videoN` and the resolved device path; `/dev/video0` is
+not trusted by name alone (`docs/video_injection_lab.md`,
+`docs/security_privacy.md`).
+
+`ActiveLivenessService` issues a random challenge (`TURN_HEAD_LEFT`,
+`TURN_HEAD_RIGHT`, `LOOK_UP`, `LOOK_DOWN`), records a baseline **after**
+issuance, and requires consecutive landmark-derived movement frames within a
+timeout. Missing/multiple faces, low confidence, invalid landmarks, face changes
+and expiry block authentication (`docs/video_injection_lab.md`,
+`docs/security_privacy.md`). This is a landmark heuristic, not calibrated 3-D
+head-pose or certified liveness (`docs/video_injection_lab.md`).
+
+### 3.6 Step-by-step: camera frame to final decision
+
+1. **Capture thread** continuously reads from a physical camera or a recorded
+   `FrameSource` into a capacity-1 `LatestFrameBuffer` (`docs/architecture.md`).
 2. **Processing thread** takes only the newest frame, so inference cannot build
    a backlog (`docs/architecture.md`).
 3. **YuNet** runs every `DETECTION_INTERVAL` processed frames (default 2)
    (`docs/architecture.md`, `README.md`).
 4. The **largest/primary face** is selected (`docs/usage.md`,
    `docs/anti_spoofing_summary.md`).
-5. If PAD is ON: crop ×2.7, resize 80×80, BGR `float32` `0..255`, run
+5. In the Video Injection Lab, optional source integrity and active liveness run
+   before PAD and identity; a failed gate blocks the remaining pipeline
+   (`docs/video_injection_lab.md`, `docs/architecture.md`).
+6. If PAD is ON: crop ×2.7, resize 80×80, BGR `float32` `0..255`, run
    MiniFASNetV2 every `PAD_FRAME_INTERVAL` frames, softmax, classify
    (`models/anti_spoofing/README.md`, `docs/anti_spoofing_summary.md`).
-6. **Temporal tracker** requires `PAD_REQUIRED_LIVE_FRAMES` consecutive live
+7. **Temporal tracker** requires `PAD_REQUIRED_LIVE_FRAMES` consecutive live
    results (default 3) (`docs/anti_spoofing_summary.md`).
-7. If PAD says `LIVE` (or PAD is OFF), **SFace** extracts the probe embedding;
+8. If PAD says `LIVE` (or PAD is OFF), **SFace** extracts the probe embedding;
    embeddings are cached per face region and reused for at most
    `RECOGNITION_INTERVAL` frames while IoU ≥ `FEATURE_CACHE_IOU`
    (`docs/architecture.md`).
-8. **Matching**: cosine similarity against enrolled templates; 1:N best match
+9. **Matching**: cosine similarity against enrolled templates; 1:N best match
    for a name label, optional 1:1 verification against a selected user
    (`docs/usage.md`, `docs/architecture.md`).
-9. **Decision**: accept if `similarity >= threshold` (default `0.363`)
-   (`README.md`, `docs/evaluation.md`).
-10. Result is published through a bounded queue; the GUI polls with `after(...)`
+10. **Decision**: accept if `similarity >= threshold` (default `0.363`)
+    (`README.md`, `docs/evaluation.md`).
+11. Result is published through a bounded queue; the GUI polls with `after(...)`
     and renders the latest result (`docs/architecture.md`).
 
-### 3.6 Threading notes (`docs/architecture.md`)
+### 3.7 Threading notes (`docs/architecture.md`)
 
 - Tkinter widgets are touched only on the main thread.
 - `LiveCameraWorker` uses two daemon threads (capture + processing).
@@ -200,7 +271,7 @@ detected with bounding-box **IoU** and reset the temporal evidence
   size for diagnostics.
 - Every SQLite operation uses a short-lived connection.
 
-### 3.7 Database schema (`docs/architecture.md`)
+### 3.8 Database schema (`docs/architecture.md`)
 
 ```sql
 CREATE TABLE users (
@@ -280,10 +351,11 @@ CREATE TABLE audit_log (
 - **Limitations:** not a certified PAD; no guarantee against masks, 3D masks,
   advanced replay, deepfakes or adversarial perturbations; thresholds are not
   calibrated; no demographic bias evaluation; no APCER/BPCER/ACER measurement
-  (`docs/anti_spoofing_summary.md`). PAD is applied **only** on the Live Camera
-  page; static-image paths, enrolment from camera, verification from camera,
-  Compare Images and the Security-page demo do **not** apply PAD
-  (`docs/anti_spoofing_summary.md`).
+  (`docs/anti_spoofing_summary.md`). PAD is applied on the Live Camera page and
+  in the Video Injection Lab when enabled; static-image paths, enrolment from
+  camera, verification from camera, Compare Images and the Security-page demo do
+  **not** apply PAD (`docs/anti_spoofing_summary.md`,
+  `docs/video_injection_lab.md`).
 - **Live demo:** show a live face → `LIVE FACE` then `VERIFIED`; show a printed
   photo or a phone screen → `AUTH BLOCKED` / `SPOOF DETECTED`; cover the face →
   `NO FACE` / `HOLD STILL` (`docs/anti_spoofing_summary.md`,
@@ -519,6 +591,54 @@ CREATE TABLE audit_log (
 - **Limitations:** local-only reduces network exposure but does not protect
   against local malware or a compromised account (`docs/security_privacy.md`).
 
+### 4.15 Video Injection Attack Lab
+
+- **What it does (user view):** replays a local recorded video through the same
+  YuNet, SFace, PAD and decision pipeline as Live Camera, and compares the
+  original configuration with source-integrity, active-liveness and PAD defenses
+  (`README.md`, `docs/video_injection_lab.md`). The page shows source kind,
+  source-integrity status, liveness challenge/progress, PAD status, whether
+  identity verification ran, final decision, detecting layer and processing time
+  (`docs/video_injection_lab.md`).
+- **How it works technically:** `RecordedVideoSource` decodes the file with
+  OpenCV, paces playback to the reported FPS, and loops by default. The same
+  `LiveCameraWorker` then runs YuNet, optional source integrity, optional active
+  liveness, optional MiniFASNetV2 PAD, and only then SFace identity verification
+  (`docs/video_injection_lab.md`, `docs/architecture.md`).
+- **What it uses:** OpenCV `VideoCapture`, YuNet, SFace, MiniFASNetV2,
+  `CameraSourceIntegrityService`, `ActiveLivenessService` and the normal matcher
+  (`docs/video_injection_lab.md`).
+- **Key parameters:** supported video extensions are `.mp4`, `.avi`, `.mov`,
+  `.mkv`, `.webm`, `.m4v`, `.mpg`, `.mpeg`. Active-liveness defaults are
+  `FACE_LIVENESS_TIMEOUT=10.0`, `FACE_LIVENESS_REQUIRED_FRAMES=3`,
+  `FACE_LIVENESS_YAW_THRESHOLD=0.18`, `FACE_LIVENESS_PITCH_THRESHOLD=0.12`,
+  `FACE_LIVENESS_MIN_CONFIDENCE=0.80`,
+  `FACE_LIVENESS_FACE_IOU_THRESHOLD=0.35` (`docs/video_injection_lab.md`).
+- **Modes / ON vs OFF:** **Original / Vulnerable** turns source integrity,
+  active liveness and PAD off; a matching replay may be accepted. **Full
+  Protection** turns all three on; a recorded file is normally rejected at
+  **Source Integrity** before liveness or identity. **Liveness Simulation** turns
+  source integrity and PAD off and active liveness on, explicitly labelled
+  untrusted/simulation; it is used to exercise the liveness layer separately.
+  **Custom** lets the user choose (`docs/video_injection_lab.md`,
+  `docs/usage.md`).
+- **Limitations:** source integrity is an application-level metadata heuristic,
+  not cryptographic camera authentication; an attacker with OS, driver,
+  virtual-camera or process-memory control can bypass it. A recorded video can
+  satisfy the head-movement challenge if it happens to perform the requested
+  movement. The liveness thresholds are not calibrated across cameras, lighting,
+  glasses, head coverings or mobility limitations. PAD remains uncertified, and
+  the lab does not evaluate deepfakes, masks, 3-D presentations or adversarial
+  perturbations. The comparison table stores the latest representative result
+  per mode, not a statistical trial (`docs/video_injection_lab.md`,
+  `docs/security_privacy.md`).
+- **Live demo:** enrol the person shown in the video, open **Academic → Video
+  Injection Lab**, choose the file and enrolled target, then run the same video
+  in Original / Vulnerable, Full Protection and Liveness Simulation. Show that
+  Full Protection blocks at `Source Integrity`, then use Liveness Simulation to
+  show the active-liveness layer (`docs/video_injection_lab.md`,
+  `docs/testing.md`).
+
 ---
 
 ## 5. Mapping to biometric theory
@@ -531,17 +651,18 @@ CREATE TABLE audit_log (
 | **Matching** | Yes | Explicit cosine similarity, "higher is more similar" | `docs/architecture.md` |
 | **Threshold** | Yes | Configurable, default `0.363`, persisted locally; uncalibrated | `README.md`, `docs/usage.md` |
 | **FAR / FRR** | Yes (evaluation module) | Computed from genuine/impostor pairs with a confusion matrix and sweep | `docs/evaluation.md` |
-| **Liveness / PAD** | Yes, optional | MiniFASNetV2 on Live Camera with temporal evidence; not certified | `README.md`, `docs/anti_spoofing_summary.md` |
+| **Liveness / PAD** | Yes, optional | MiniFASNetV2 on Live Camera with temporal evidence; the lab adds a head-movement challenge and source integrity; neither is certified | `README.md`, `docs/anti_spoofing_summary.md`, `docs/video_injection_lab.md` |
+| **Source integrity** | Yes, lab only (heuristic) | Classifies recorded/physical/virtual/unknown sources and binds a session; not cryptographic camera authentication | `docs/video_injection_lab.md`, `docs/security_privacy.md` |
 | **Fallback** | No (not documented) | No alternative authentication is documented. PAD is fail-closed (block), not a fallback | `docs/anti_spoofing_summary.md` |
 | **1:1 verification** | Yes | Verify Identity and optional Live Camera verification | `docs/usage.md` |
 | **1:N identification** | Yes (demo) | Live name labels are open-set 1:N, not proof of identity | `docs/usage.md`, `docs/security_privacy.md` |
 | **Template protection** | Partial | Encryption at rest with Fernet; decrypted in memory for matching | `docs/security_privacy.md` |
-| **Multimodal / challenge-response / depth / IR** | No | Explicitly absent | `docs/anti_spoofing_summary.md` |
+| **Multimodal / challenge-response / depth / IR** | Partial | A landmark-based head-movement challenge exists in the Video Injection Lab; depth, IR and multimodal sensing are absent | `docs/video_injection_lab.md`, `docs/anti_spoofing_summary.md` |
 
-**What the app does not implement:** certified PAD, challenge-response, depth/IR
+**What the app does not implement:** certified PAD or liveness detection, depth/IR
 sensing, demographic fairness evaluation, threshold calibration, secure
 hardware key storage, key rotation, and any documented fallback authentication
-method (`docs/anti_spoofing_summary.md`, `docs/security_privacy.md`,
+method (`docs/video_injection_lab.md`, `docs/security_privacy.md`,
 `README.md`).
 
 ---
@@ -566,7 +687,9 @@ method (`docs/anti_spoofing_summary.md`, `docs/security_privacy.md`,
 - Enrolment photographs are **never written to the database**; only the encrypted
   template and basic metadata are stored (`README.md`, `docs/security_privacy.md`).
 - Audit events contain event type, user ID, score, threshold and source, but **not
-  images or raw embeddings** (`docs/security_privacy.md`).
+  images or raw embeddings** (`docs/security_privacy.md`). The Video Injection
+  Lab also records source-session and active-liveness challenge events without
+  frames or embeddings (`docs/video_injection_lab.md`).
 - The GUI shows only a template size, not the vector; evaluation exports contain
   file paths and similarity scores, not embeddings (`docs/security_privacy.md`).
 - Optional annotated exports may be written under `results/`
@@ -606,6 +729,33 @@ method (`docs/anti_spoofing_summary.md`, `docs/security_privacy.md`,
 The OS account and file permissions are part of the security boundary
 (`README.md`, `docs/security_privacy.md`).
 
+### 6.6 Video injection, source integrity and camera trust
+
+- The Video Injection Lab adds optional gates before passive PAD and identity:
+  source integrity → active liveness → MiniFASNetV2 PAD → SFace
+  (`docs/security_privacy.md`, `docs/video_injection_lab.md`).
+- Source integrity classifies the frame origin and binds it to one session.
+  Recorded files, virtual-camera indicators, unsupported topology and unbound
+  sessions fail closed when enabled; a source-identity change invalidates the
+  session (`docs/video_injection_lab.md`, `docs/security_privacy.md`).
+- On Linux, metadata is read from `/sys/class/video4linux/videoN` and the
+  resolved device path; `/dev/video0` is not trusted by name alone
+  (`docs/video_injection_lab.md`).
+- Active liveness issues a random head-movement challenge using YuNet landmarks,
+  records a baseline after issuance, and requires consecutive movement frames
+  within a timeout. Missing/multiple faces, low confidence, invalid landmarks,
+  face changes and expiry block authentication (`docs/video_injection_lab.md`).
+- **Limits:** source integrity is an application-level metadata check, not
+  cryptographic camera authenticity. A malicious virtual camera, kernel driver,
+  OS-level frame injection or process-memory attacker can bypass it. A recorded
+  video can satisfy the movement challenge if it performs the requested
+  movement. Active-liveness thresholds are not calibrated across cameras,
+  lighting, glasses, head coverings or user mobility
+  (`docs/video_injection_lab.md`, `docs/security_privacy.md`).
+- Full Protection normally rejects a recorded source at the source gate, so
+  active liveness is not reached; Liveness Simulation is the labelled mode used
+  to exercise that layer separately (`docs/video_injection_lab.md`).
+
 ---
 
 ## 7. Suggested content for presentation slides 17–19
@@ -616,6 +766,9 @@ The OS account and file permissions are part of the security boundary
 - Build a local-only desktop demo of face detection, 1:1 verification and
   optional presentation-attack detection for a Master's Cybersecurity project
   (`README.md`).
+- Demonstrate a **Video Injection Attack Lab** that replays a recorded file
+  through the real pipeline and compares source-integrity, active-liveness and
+  PAD defenses (`docs/video_injection_lab.md`, `README.md`).
 - Show the biometric pipeline end-to-end: enrolment → feature extraction →
   template → matching → threshold → FAR/FRR (`docs/architecture.md`,
   `docs/evaluation.md`).
@@ -641,6 +794,9 @@ The OS account and file permissions are part of the security boundary
   (`docs/evaluation.md`).
 - PAD test samples: official Silent-Face genuine/attack images under
   `tests/assets/anti_spoofing/` (`tests/assets/anti_spoofing/README.md`).
+- Recorded-video demo: any supported local video file (`.mp4`, `.avi`, `.mov`,
+  `.mkv`, `.webm`, `.m4v`, `.mpg`, `.mpeg`) of the enrolled person, selected in
+  the Video Injection Lab (`docs/video_injection_lab.md`).
 
 ### Slide 18 — Execution steps / screenshots to capture
 
@@ -661,16 +817,20 @@ The OS account and file permissions are part of the security boundary
    `SPOOF DETECTED` (`docs/testing.md`).
 10. **Toggle PAD OFF** — original behavior returns without camera restart
     (`docs/testing.md`).
-11. **Evaluation & Metrics** — run on `images/eval_demo`, show confusion matrix
+11. **Video Injection Lab** — run the same recorded video in Original /
+    Vulnerable, Full Protection and Liveness Simulation; show the source
+    rejection and the active-liveness layer (`docs/video_injection_lab.md`,
+    `docs/testing.md`).
+12. **Evaluation & Metrics** — run on `images/eval_demo`, show confusion matrix
     and FAR/FRR chart (`docs/usage.md`, `docs/evaluation.md`).
-12. **Security & Privacy** — static-photo demo and threshold control
+13. **Security & Privacy** — static-photo demo and threshold control
     (`docs/usage.md`).
-13. **About the Project** — objectives, stack, Facelock analysis, disclaimer
+14. **About the Project** — objectives, stack, Facelock analysis, disclaimer
     (`docs/usage.md`).
 
 Suggested screenshots: Dashboard, Register User, User Database, Verify Identity,
 Compare Two Images, Live Camera (PAD OFF), Live Camera (PAD ON + spoof blocked),
-Evaluation results, Security & Privacy.
+Video Injection Lab comparison, Evaluation results, Security & Privacy.
 
 ### Slide 19 — Results and limits
 
@@ -682,9 +842,20 @@ Evaluation results, Security & Privacy.
   (`docs/usage.md`, `docs/security_privacy.md`).
 - Optional PAD that blocks SFace on spoof/uncertain/error/no-face
   (`docs/anti_spoofing_summary.md`).
+- Video Injection Lab replays a recorded file through the real pipeline and
+  records source/liveness/PAD/identity metadata (`docs/video_injection_lab.md`).
 - Evaluation exports confusion matrix, FAR/FRR, accuracy, precision, recall and
   a 101-point threshold sweep (`docs/evaluation.md`).
-- Test suite: **117 passed** (`docs/testing.md`, `README.md`).
+- Test suite: **143 passed** (`docs/testing.md`, `README.md`).
+
+**Expected Video Injection Lab comparison** (`docs/video_injection_lab.md`)
+- Original / Vulnerable: a matching replay may be **ACCEPTED** if recognition
+  alone succeeds.
+- Full Protection: a recorded source is normally **BLOCKED** at
+  **Source Integrity** before active liveness or identity runs.
+- Liveness Simulation: **BLOCKED** unless the recording happens to satisfy the
+  random head-movement challenge.
+- These are expected demonstration outcomes, not a statistical benchmark.
 
 **Observed smoke-test result at threshold `0.363`** (`docs/evaluation.md`)
 - 4 identities, 5 usable images
@@ -707,8 +878,14 @@ Evaluation results, Security & Privacy.
 - Templates are decrypted in memory during matching; the key sits next to the
   database (`README.md`, `docs/security_privacy.md`).
 - Display names are plaintext; deletion is logical (`docs/security_privacy.md`).
-- No challenge-response, depth/IR, rate limiting, lockout or MFA
-  (`docs/anti_spoofing_summary.md`).
+- No certified challenge-response/liveness, depth/IR, rate limiting, lockout or
+  MFA. The lab's head-movement challenge is a heuristic and can be satisfied by
+  a suitable recording (`docs/video_injection_lab.md`,
+  `docs/anti_spoofing_summary.md`).
+- Source integrity is an application-level metadata check, not cryptographic
+  camera authentication; OS-level injection, malicious drivers and virtual
+  cameras can bypass it (`docs/video_injection_lab.md`,
+  `docs/security_privacy.md`).
 
 ---
 
@@ -734,8 +911,9 @@ Evaluation results, Security & Privacy.
    claim (`docs/evaluation.md`).
 
 5. **What does anti-spoofing actually use?**
-   MiniFASNetV2 ONNX via `onnxruntime`, applied only on the Live Camera page
-   (`README.md`, `models/anti_spoofing/README.md`).
+   MiniFASNetV2 ONNX via `onnxruntime`, applied on the Live Camera page and in
+   the Video Injection Lab when PAD is enabled (`README.md`,
+   `models/anti_spoofing/README.md`, `docs/video_injection_lab.md`).
 
 6. **How does PAD decide live vs spoof?**
    Crop ×2.7 → 80×80 BGR `float32` `0..255` → 3 logits → softmax; index 1 is
@@ -752,8 +930,9 @@ Evaluation results, Security & Privacy.
    (`README.md`, `docs/usage.md`).
 
 9. **Does PAD cover every page?**
-   No. It covers only Live Camera. Enrolment, Verification, Compare Images and
-   the Security-page demo do not apply PAD (`docs/anti_spoofing_summary.md`).
+   No. It covers Live Camera and, when enabled, the Video Injection Lab.
+   Enrolment, Verification, Compare Images and the Security-page demo do not
+   apply PAD (`docs/anti_spoofing_summary.md`, `docs/video_injection_lab.md`).
 
 10. **How are templates stored?**
     As Fernet-encrypted blobs (AES-128-CBC + HMAC-SHA256) in SQLite; the key is
@@ -780,9 +959,11 @@ Evaluation results, Security & Privacy.
     (`docs/evaluation.md`).
 
 15. **Why is this not production-ready?**
-    Uncalibrated threshold, uncertified PAD, no bias evaluation, no hardware key
-    storage, plaintext metadata, no rate limiting/MFA, and no real-world dataset
-    (`README.md`, `docs/security_privacy.md`, `docs/anti_spoofing_summary.md`).
+    Uncalibrated threshold, uncertified PAD/liveness, no bias evaluation, no
+    hardware key storage, plaintext metadata, no rate limiting/MFA, no real-world
+    dataset, and source integrity is only an application-level metadata check
+    (`README.md`, `docs/security_privacy.md`, `docs/anti_spoofing_summary.md`,
+    `docs/video_injection_lab.md`).
 
 16. **Why SFace instead of Facelock?**
     Facelock (PyPI 0.1.2, MIT, April 2025) is a small InsightFace wrapper with a
@@ -792,13 +973,43 @@ Evaluation results, Security & Privacy.
 
 17. **How do you demonstrate that recognition is not liveness?**
     Use the Security & Privacy page's static-photo demo, which intentionally has
-    no PAD and can accept a still photograph (`docs/usage.md`,
-    `docs/security_privacy.md`).
+    no PAD and can accept a still photograph. The Video Injection Lab also shows
+    a recorded replay reaching identity in Original / Vulnerable mode
+    (`docs/usage.md`, `docs/security_privacy.md`, `docs/video_injection_lab.md`).
 
 18. **What tests exist?**
-    117 tests covering models, matching, encryption, database, enrolment,
-    verification, evaluation, PAD, camera lifecycle, performance, settings and a
-    GUI smoke test (`docs/testing.md`).
+    143 tests covering models, matching, encryption, database, enrolment,
+    verification, evaluation, PAD, recorded-video sources, source integrity,
+    active liveness, video-injection integration, camera lifecycle, performance,
+    settings and a GUI smoke test (`docs/testing.md`).
+
+19. **What is the Video Injection Lab?**
+    A GUI page under **Academic** that decodes a local recorded video with
+    OpenCV and sends the frames through the real `LiveCameraWorker`, YuNet,
+    SFace, PAD and decision pipeline. It is not a separate recognition
+    implementation (`docs/video_injection_lab.md`, `README.md`).
+
+20. **How does source integrity work?**
+    It classifies the frame origin and binds the source identity to one session.
+    Recorded files, virtual-camera indicators, unsupported topology and unbound
+    sessions fail closed when enabled. On Linux it reads
+    `/sys/class/video4linux/videoN` and the resolved device path; `/dev/video0`
+    is not trusted by name alone. This is not cryptographic camera
+    authentication (`docs/video_injection_lab.md`, `docs/security_privacy.md`).
+
+21. **How does active liveness work?**
+    It issues a random head-movement challenge (`TURN_HEAD_LEFT`,
+    `TURN_HEAD_RIGHT`, `LOOK_UP`, `LOOK_DOWN`), records a baseline after
+    issuance, and requires consecutive landmark-derived movement frames within a
+    timeout. Missing/multiple faces, low confidence, invalid landmarks, face
+    changes and expiry block authentication. It is a heuristic, not certified
+    liveness (`docs/video_injection_lab.md`, `docs/security_privacy.md`).
+
+22. **Why does Full Protection reject the recorded video at Source Integrity?**
+    The default source policy rejects recorded files, so identity and active
+    liveness are not reached. Use Liveness Simulation to exercise the
+    active-liveness layer separately; that mode is explicitly labelled
+    untrusted/simulation (`docs/video_injection_lab.md`).
 
 ---
 
@@ -848,20 +1059,25 @@ claims:
 20. **Whether PAD decisions are audited**; the docs say PAD state/evidence is not
     persisted and PAD decisions are not specifically logged
     (`docs/anti_spoofing_summary.md`).
+21. **Empirical bypass/robustness evaluation of source integrity and active
+    liveness**; the docs state their limitations but provide no attack benchmark
+    or calibrated liveness thresholds. **غير موثّق في ملفات الـ docs** as an
+    evaluation result (`docs/video_injection_lab.md`,
+    `docs/security_privacy.md`).
 
 ---
 
 ## Final summary
 
-**Markdown files read (13):**
+**Markdown files read (14):**
 `README.md`, `README.ar.md`, `models/anti_spoofing/README.md`,
 `docs/evaluation.md`, `docs/anti_spoofing_summary.md`, `docs/testing.md`,
-`docs/architecture.md`, `tests/assets/anti_spoofing/README.md`,
-`docs/setup.md`, `docs/usage.md`, `docs/security_privacy.md`,
-`docs/tool_selection.md`, `docs/ar/README.md`.
+`docs/architecture.md`, `docs/video_injection_lab.md`,
+`tests/assets/anti_spoofing/README.md`, `docs/setup.md`, `docs/usage.md`,
+`docs/security_privacy.md`, `docs/tool_selection.md`, `docs/ar/README.md`.
 
 **Manifest opened only to confirm versions:** `requirements.txt`.
 
 **Output file:** `PRESENTATION_NOTES.md` at the project root.
 
-**Length:** 867 lines (Markdown).
+**Length:** 1083 lines (Markdown).

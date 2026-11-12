@@ -13,12 +13,15 @@ Application services (AppContext)
     +--> FaceEngine        YuNet detection + SFace embeddings
     +--> FaceMatcher       cosine similarity + threshold decision
     +--> AntiSpoofingService  optional MiniFASNetV2 PAD runtime
+    +--> CameraSourceIntegrityService  source policy + session binding
+    +--> ActiveLivenessService  landmark-based challenge-response
     +--> EnrollmentService
     +--> VerificationService
     +--> EvaluationService
     +--> FaceDatabase      SQLite + encrypted templates
     +--> TemplateCipher    Fernet key management
     +--> CameraManager     OpenCV VideoCapture lifecycle
+    +--> FrameSource       physical camera or recorded-video abstraction
 ```
 
 `config/settings.py` supplies paths, model names, quality limits and threshold
@@ -81,6 +84,40 @@ Face changes are detected with bounding-box IoU and reset the temporal evidence.
 The runtime is disabled by default, so OFF mode adds no PAD inference and keeps
 the original YuNet + SFace behaviour.
 
+### Recorded-video injection lab
+
+```text
+recorded video file
+  -> RecordedVideoSource (OpenCV decode, pacing, loop/pause/replay)
+  -> LiveCameraWorker (same capture + processing threads)
+  -> YuNet detect
+  -> source integrity (optional, fail-closed)
+  -> active liveness (optional, fail-closed)
+  -> MiniFASNetV2 PAD (optional, fail-closed)
+  -> SFace identity verification
+  -> LiveFrameResult with source/liveness/PAD/identity metadata
+```
+
+The worker accepts an optional `FrameSource`. Without one it wraps
+`CameraManager` in `PhysicalCameraSource`, preserving the Live Camera page and
+its tests. The lab uses `RecordedVideoSource`, so the same worker, engine,
+matcher, threshold and PAD runtime process the replayed frames.
+
+The default gate order is source integrity, active liveness, passive PAD, then
+identity. A failed gate sets `final_decision=REJECTED` and records the detecting
+layer; identity verification does not run before the enabled gates pass.
+
+`CameraSourceIntegrityService` classifies source metadata and binds the source
+identity to a session. Recorded files, virtual-camera indicators, unknown
+topology and unbound sessions fail closed when enabled. This is an
+application-level metadata check, not cryptographic camera authentication.
+
+`ActiveLivenessService` issues a random head-movement challenge
+(`TURN_HEAD_LEFT`, `TURN_HEAD_RIGHT`, `LOOK_UP`, `LOOK_DOWN`), records a baseline
+after issuance, and requires consecutive landmark-derived movement frames within
+a timeout. Missing/multiple faces, low confidence, face changes and expiry fail
+closed. The thresholds are heuristics and are not calibrated 3-D pose estimates.
+
 ### Evaluation
 
 ```text
@@ -103,15 +140,20 @@ dataset/<identity>/<images>
 | `core/image_processor.py` | Safe image loading, quality checks, annotation, comparison overlay |
 | `core/matcher.py` | `MatchResult`, `decide`, `FaceMatcher` |
 | `core/anti_spoofing.py` | MiniFASNetV2 loading/inference, raw-BGR preprocessing, PAD tracker and runtime |
+| `core/frame_source.py` | `FrameSource` contract, physical-camera adapter, recorded-video decoding and playback metadata |
+| `core/source_integrity.py` | Source classification, policy, session binding, invalidation and audit events |
+| `core/active_liveness.py` | Randomized landmark-based challenge-response state machine |
+| `core/protection.py` | Protection mode configuration and final-decision/layer constants |
 | `core/security.py` | User input validation, private permissions, Fernet encryption |
 | `core/database.py` | SQLite schema, encrypted templates, users, audit log |
 | `core/enrollment.py` | Consent, validation, quality gate, template creation |
 | `core/verification.py` | 1:1 probe comparison against one user |
 | `core/evaluation.py` | Dataset scan, pair generation, metrics, CSV and chart |
 | `core/camera_manager.py` | Device discovery and `VideoCapture` lifecycle |
-| `core/app_context.py` | Composition root, shared threshold updates, optional PAD service |
+| `core/app_context.py` | Composition root, shared threshold updates, optional PAD, source-integrity and active-liveness services |
 | `gui/main_window.py` | Sidebar, page router, status bar, shutdown |
-| `gui/camera_worker.py` | Background camera/detection worker and result queue |
+| `gui/camera_worker.py` | Background camera/detection worker, optional frame source and protection gates, result queue |
+| `gui/video_injection_lab.py` | Recorded-video attack comparison page |
 | `gui/*_page.py` | Page-specific UI and event handlers |
 | `scripts/run_evaluation.py` | Headless evaluation runner |
 
@@ -146,8 +188,9 @@ where the filesystem supports it.
 
 - Tkinter widgets are touched only on the main thread.
 - `LiveCameraWorker` uses two daemon threads. The capture thread continuously
-  reads frames into a capacity-1 `LatestFrameBuffer`; the processing thread takes
-  only the newest frame, so inference cannot accumulate a backlog.
+  reads from either a physical camera or a recorded `FrameSource` into a
+  capacity-1 `LatestFrameBuffer`; the processing thread takes only the newest
+  frame, so inference cannot accumulate a backlog.
 - The processing thread runs YuNet every `DETECTION_INTERVAL` processed frames,
   optionally runs MiniFASNetV2 on the primary face, compares eligible faces with
   the enrolled templates for name labels, and publishes the newest
@@ -193,8 +236,9 @@ conversion and an optional real-camera worker run with or without PAD.
 - Database conflicts raise `DuplicateUserError`; missing users raise
   `UserNotFoundError`.
 - Encryption failures raise `SecurityError`.
-- Camera failures raise `CameraError`; the worker publishes the error instead of
-  dying silently.
+- Camera failures raise `CameraError`; frame-source failures raise
+  `FrameSourceError` (with `FrameSourceEnded` for finite playback). The worker
+  publishes the error instead of dying silently.
 - GUI actions catch expected domain errors and show a message rather than
   crashing the event loop.
 - Audit logging is best-effort and must not break a biometric workflow.

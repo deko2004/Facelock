@@ -17,6 +17,7 @@ from gui.live_camera import LiveCameraPage
 from gui.security_page import SecurityPage
 from gui.styles import COLORS, font, setup_styles
 from gui.verification_page import VerificationPage
+from gui.video_injection_lab import VideoInjectionLabPage
 
 PAGE_CLASSES = {
     "dashboard": DashboardPage,
@@ -26,6 +27,7 @@ PAGE_CLASSES = {
     "verification": VerificationPage,
     "database": DatabasePage,
     "evaluation": EvaluationPage,
+    "video_lab": VideoInjectionLabPage,
     "security": SecurityPage,
     "about": AboutPage,
 }
@@ -54,6 +56,7 @@ NAV_SECTIONS = [
     (
         "ACADEMIC",
         [
+            ("video_lab", "Video Injection Lab"),
             ("security", "Security & Privacy"),
             ("about", "About the Project"),
         ],

@@ -61,6 +61,20 @@ PAD_REQUIRED_LIVE_FRAMES = int(os.environ.get("FACE_PAD_REQUIRED_LIVE_FRAMES", "
 PAD_FRAME_INTERVAL = int(os.environ.get("FACE_PAD_FRAME_INTERVAL", "2"))
 PAD_FACE_IOU_THRESHOLD = float(os.environ.get("FACE_PAD_FACE_IOU_THRESHOLD", "0.35"))
 
+#: Active-liveness challenge-response.  Head pose is derived from YuNet
+#: landmarks; thresholds are normalized by inter-eye distance and are not
+#: calibrated on a representative corpus.
+LIVENESS_TIMEOUT = max(1.0, _env_float("FACE_LIVENESS_TIMEOUT", 10.0))
+LIVENESS_REQUIRED_FRAMES = max(1, _env_int("FACE_LIVENESS_REQUIRED_FRAMES", 3))
+LIVENESS_YAW_THRESHOLD = max(0.01, _env_float("FACE_LIVENESS_YAW_THRESHOLD", 0.18))
+LIVENESS_PITCH_THRESHOLD = max(0.01, _env_float("FACE_LIVENESS_PITCH_THRESHOLD", 0.12))
+LIVENESS_MIN_CONFIDENCE = max(
+    0.0, min(1.0, _env_float("FACE_LIVENESS_MIN_CONFIDENCE", 0.80))
+)
+LIVENESS_FACE_IOU_THRESHOLD = max(
+    0.0, min(1.0, _env_float("FACE_LIVENESS_FACE_IOU_THRESHOLD", 0.35))
+)
+
 DATABASE_FILE = DATABASE_DIR / "biometric.db"
 TEMPLATE_KEY_FILE = DATABASE_DIR / "templates.key"
 APP_SETTINGS_FILE = DATABASE_DIR / "app_settings.json"

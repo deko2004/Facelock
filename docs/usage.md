@@ -138,6 +138,39 @@ uses the same uncalibrated threshold as verification, and false matches become
 more likely as the number of enrolled users grows. Restart the camera after
 adding a new user so the new template is loaded.
 
+## Video Injection Attack Lab
+
+The **Academic -> Video Injection Lab** page replays a local recorded video
+through the real YuNet/SFace/PAD authentication pipeline. It is not a separate
+recognition implementation.
+
+1. Enrol the person shown in the video.
+2. Choose a supported video file and select the enrolled target user.
+3. Choose a mode:
+   - **Original / Vulnerable**: source integrity, active liveness and PAD are
+     off. A matching replay may be accepted.
+   - **Full Protection**: all three protections are on. A recorded source is
+     rejected before identity verification.
+   - **Liveness Simulation**: source integrity and PAD are off; active liveness
+     is on. This is a labelled simulation because a recorded source is not
+     trusted.
+4. Press **Run attack**. Use Pause, Resume, Replay or Stop as needed.
+5. Read the pipeline panel: source kind, source-integrity status, liveness
+   challenge/progress, PAD status, whether identity verification ran, final
+   decision and the layer that detected the attack.
+6. Run the same video in the other modes and compare the results table.
+
+Full Protection normally blocks at **Source Integrity**; active liveness is not
+reached in that mode. Use Liveness Simulation to exercise the liveness layer. A
+recording can satisfy a random head-movement challenge if it happens to perform
+the requested movement, so a pass is not proof of a live person.
+
+The lab is a demonstration. Application-level source validation is not
+cryptographic camera authentication, and OS-level frame injection, malicious
+drivers or virtual cameras can bypass it. See
+[video_injection_lab.md](video_injection_lab.md) for the full design and
+limitations.
+
 ## User Database
 
 The **User Database** page lists enrolled users and lets you inspect metadata.
