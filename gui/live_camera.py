@@ -7,6 +7,7 @@ import re
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from config import settings
 from core.anti_spoofing import (
     PAD_ANALYZING,
     PAD_DISABLED,
@@ -37,6 +38,10 @@ class LiveCameraPage(BasePage):
         self._poll_id: str | None = None
         self._user_map: dict[str, str] = {}
         self._camera_values: list[str] = []
+        self._diagnostics_enabled = settings.PERFORMANCE_DIAGNOSTICS
+        self._last_state: tuple[str, str] | None = None
+        self._last_pad_ui_key: tuple | None = None
+        self._last_labels: dict[str, str] = {}
 
         PageHeader(
             self,
@@ -150,6 +155,11 @@ class LiveCameraPage(BasePage):
             status_card, 10, "Target user", "No target (identification only)"
         )
         self.pad_value = self._status_row(status_card, 12, "Anti-spoofing", "OFF")
+        self.diagnostics_value: ttk.Label | None = None
+        if self._diagnostics_enabled:
+            self.diagnostics_value = self._status_row(
+                status_card, 14, "Performance", "-"
+            )
 
         self._refresh_cameras()
         self._refresh_users()
@@ -162,6 +172,18 @@ class LiveCameraPage(BasePage):
         label = ttk.Label(parent, text=value, style="CardValueSmall.TLabel")
         label.grid(row=row + 1, column=0, sticky="w")
         return label
+
+    def _set_label(self, label: ttk.Label, key: str, value: str) -> None:
+        if self._last_labels.get(key) == value:
+            return
+        self._last_labels[key] = value
+        label.configure(text=value)
+
+    def _set_state(self, text: str, kind: str) -> None:
+        if self._last_state == (text, kind):
+            return
+        self._last_state = (text, kind)
+        self.state_badge.set(text, kind)
 
     def on_show(self) -> None:
         self._refresh_cameras()
@@ -286,6 +308,17 @@ class LiveCameraPage(BasePage):
         streak: int = 0,
         required: int = 0,
     ) -> None:
+        key = (
+            status,
+            message,
+            live_score,
+            streak,
+            required,
+            self.pad_var.get(),
+        )
+        if key == self._last_pad_ui_key:
+            return
+        self._last_pad_ui_key = key
         badge_text, kind, default_hint = self._pad_status_info(status)
         colours = {
             "success": COLORS["success"],
@@ -398,7 +431,7 @@ class LiveCameraPage(BasePage):
             return
         template = user.embedding if user is not None else None
         self.panel.set_message("Opening camera...")
-        self.state_badge.set("STARTING", "warning")
+        self._set_state("STARTING", "warning")
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.camera_combo.configure(state="disabled")
@@ -410,7 +443,7 @@ class LiveCameraPage(BasePage):
                 else "No target (identification only)"
             )
         )
-        self.score_value.configure(text="-")
+        self._set_label(self.score_value, "score", "-")
         if pad_snapshot.enabled:
             self._update_pad_ui(PAD_ANALYZING, "Starting liveness checks...")
         else:
@@ -430,20 +463,34 @@ class LiveCameraPage(BasePage):
     def _poll(self) -> None:
         if self._worker is None:
             return
+        latest: LiveFrameResult | None = None
+        error: LiveFrameResult | None = None
+        finished = False
         while True:
             try:
                 result = self._worker.result_queue.get_nowait()
             except queue.Empty:
                 break
-            self._handle(result)
+            if result.error:
+                error = result
+            elif result.finished:
+                finished = True
+            else:
+                latest = result
+        if error is not None:
+            self._handle(error)
+        elif latest is not None:
+            self._handle(latest)
+        elif finished:
+            self._handle(LiveFrameResult(finished=True))
         if self._worker is not None and self._worker.is_alive():
-            self._poll_id = self.after(30, self._poll)
+            self._poll_id = self.after(settings.PREVIEW_REFRESH_MS, self._poll)
         else:
             self._poll_id = None
 
     def _handle(self, result: LiveFrameResult) -> None:
         if result.error:
-            self.state_badge.set("CAMERA ERROR", "danger")
+            self._set_state("CAMERA ERROR", "danger")
             self.panel.set_message("Camera unavailable")
             messagebox.showerror("Camera error", result.error)
             self._stop(silent=True)
@@ -451,17 +498,24 @@ class LiveCameraPage(BasePage):
         if result.finished:
             return
         if result.annotated_frame is not None:
-            self.panel.show_bgr(result.annotated_frame, max_size=(820, 470))
+            self.panel.show_bgr(
+                result.annotated_frame, max_size=(820, 470), fast=True
+            )
         if result.identifications:
-            self.face_value.configure(
-                text=(
-                    f"{len(result.detections)} "
-                    f"({result.recognized_count} recognized)"
-                )
+            face_text = (
+                f"{len(result.detections)} "
+                f"({result.recognized_count} recognized)"
             )
         else:
-            self.face_value.configure(text=str(len(result.detections)))
-        self.fps_value.configure(text=f"{result.fps:.1f}")
+            face_text = str(len(result.detections))
+        self._set_label(self.face_value, "faces", face_text)
+        self._set_label(self.fps_value, "fps", f"{result.fps:.1f}")
+        if self.diagnostics_value is not None and result.diagnostics is not None:
+            self._set_label(
+                self.diagnostics_value,
+                "diagnostics",
+                result.diagnostics.summary(),
+            )
 
         if result.pad_enabled:
             self._update_pad_ui(
@@ -473,17 +527,19 @@ class LiveCameraPage(BasePage):
             )
             if result.pad_status == PAD_LIVE:
                 if result.similarity is not None:
-                    self.score_value.configure(text=f"{result.similarity:.4f}")
+                    self._set_label(
+                        self.score_value, "score", f"{result.similarity:.4f}"
+                    )
                     if result.verified:
-                        self.state_badge.set("VERIFIED", "success")
+                        self._set_state("VERIFIED", "success")
                     else:
-                        self.state_badge.set("NOT VERIFIED", "danger")
+                        self._set_state("NOT VERIFIED", "danger")
                 elif result.recognized_count:
-                    self.score_value.configure(text="-")
-                    self.state_badge.set("FACE RECOGNIZED", "success")
+                    self._set_label(self.score_value, "score", "-")
+                    self._set_state("FACE RECOGNIZED", "success")
                 else:
-                    self.score_value.configure(text="-")
-                    self.state_badge.set("LIVE FACE", "success")
+                    self._set_label(self.score_value, "score", "-")
+                    self._set_state("LIVE FACE", "success")
                 return
             blocked = {
                 PAD_SPOOF: ("AUTH BLOCKED", "danger"),
@@ -494,27 +550,29 @@ class LiveCameraPage(BasePage):
                 PAD_UNCERTAIN: ("HOLD STILL", "warning"),
             }
             if result.pad_status in blocked:
-                self.score_value.configure(text="-")
+                self._set_label(self.score_value, "score", "-")
                 text, kind = blocked[result.pad_status]
-                self.state_badge.set(text, kind)
+                self._set_state(text, kind)
                 return
         else:
             self._update_pad_ui(PAD_DISABLED)
 
         if result.similarity is None:
-            self.score_value.configure(text="-")
+            self._set_label(self.score_value, "score", "-")
             if result.recognized_count:
-                self.state_badge.set("FACE RECOGNIZED", "success")
+                self._set_state("FACE RECOGNIZED", "success")
             elif result.detections:
-                self.state_badge.set("FACE DETECTED", "info")
+                self._set_state("FACE DETECTED", "info")
             else:
-                self.state_badge.set("NO FACE", "warning")
+                self._set_state("NO FACE", "warning")
         else:
-            self.score_value.configure(text=f"{result.similarity:.4f}")
+            self._set_label(
+                self.score_value, "score", f"{result.similarity:.4f}"
+            )
             if result.verified:
-                self.state_badge.set("VERIFIED", "success")
+                self._set_state("VERIFIED", "success")
             else:
-                self.state_badge.set("NOT VERIFIED", "danger")
+                self._set_state("NOT VERIFIED", "danger")
 
     def _stop(self, silent: bool = False) -> None:
         if self._poll_id is not None:
@@ -537,8 +595,8 @@ class LiveCameraPage(BasePage):
         self.user_combo.configure(state="readonly")
         if not silent:
             self.panel.set_message("Camera stopped")
-            self.state_badge.set("IDLE", "muted")
-            self.face_value.configure(text="-")
-            self.fps_value.configure(text="-")
-            self.score_value.configure(text="-")
+            self._set_state("IDLE", "muted")
+            self._set_label(self.face_value, "faces", "-")
+            self._set_label(self.fps_value, "fps", "-")
+            self._set_label(self.score_value, "score", "-")
         self._refresh_pad_state()

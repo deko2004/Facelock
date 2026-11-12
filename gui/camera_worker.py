@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from config import settings
 from core.anti_spoofing import (
     PAD_ANALYZING,
     PAD_DISABLED,
@@ -27,9 +28,36 @@ from core.anti_spoofing import (
     PadTracker,
 )
 from core.camera_manager import CameraError, CameraManager
+from core.diagnostics import PerformanceMonitor, PerformanceSnapshot
 from core.face_engine import FaceDetection, FaceEngine, FaceEngineError
+from core.frame_buffer import LatestFrameBuffer
 from core.image_processor import draw_faces, draw_pad_status
 from core.matcher import EnrolledIdentity, Identification, identify
+
+
+def _bbox_iou(
+    first: tuple[int, int, int, int], second: tuple[int, int, int, int]
+) -> float:
+    ax, ay, aw, ah = first
+    bx, by, bw, bh = second
+    if aw <= 0 or ah <= 0 or bw <= 0 or bh <= 0:
+        return 0.0
+    left = max(ax, bx)
+    top = max(ay, by)
+    right = min(ax + aw, bx + bw)
+    bottom = min(ay + ah, by + bh)
+    intersection = max(0, right - left) * max(0, bottom - top)
+    if intersection <= 0:
+        return 0.0
+    union = aw * ah + bw * bh - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+@dataclass
+class _FeatureCacheEntry:
+    bbox: tuple[int, int, int, int]
+    feature: np.ndarray
+    frame_number: int
 
 
 @dataclass
@@ -54,6 +82,7 @@ class LiveFrameResult:
     pad_spoof: bool = False
     pad_live_streak: int = 0
     pad_required_frames: int = 0
+    diagnostics: PerformanceSnapshot | None = None
 
     @property
     def recognized_count(self) -> int:
@@ -78,6 +107,8 @@ class LiveCameraWorker(threading.Thread):
         camera_manager: CameraManager | None = None,
         identities: list[EnrolledIdentity] | None = None,
         pad_runtime: PadRuntime | None = None,
+        detection_interval: int | None = None,
+        recognition_interval: int | None = None,
     ) -> None:
         super().__init__(daemon=True)
         self.engine = engine
@@ -88,10 +119,43 @@ class LiveCameraWorker(threading.Thread):
         self.identities = list(identities or [])
         self.camera = camera_manager or CameraManager()
         self.pad_runtime = pad_runtime
-        self.result_queue: queue.Queue[LiveFrameResult] = queue.Queue(maxsize=2)
+        self.detection_interval = max(
+            1,
+            int(
+                detection_interval
+                if detection_interval is not None
+                else settings.DETECTION_INTERVAL
+            ),
+        )
+        requested_recognition = max(
+            1,
+            int(
+                recognition_interval
+                if recognition_interval is not None
+                else settings.RECOGNITION_INTERVAL
+            ),
+        )
+        # SFace should not run more often than detections refresh; otherwise it
+        # could align a current frame with landmarks from an older frame.
+        self.recognition_interval = max(
+            requested_recognition, self.detection_interval
+        )
+        self.feature_cache_iou = settings.FEATURE_CACHE_IOU
+        self.result_queue: queue.Queue[LiveFrameResult] = queue.Queue(
+            maxsize=settings.RESULT_QUEUE_SIZE
+        )
+        self._frames = LatestFrameBuffer()
+        self._capture_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._fps = 0.0
-        self._last_time = time.perf_counter()
+        self._process_fps = 0.0
+        self._capture_last_time = 0.0
+        self._process_last_time = 0.0
+        self._frame_counter = 0
+        self._detection_valid = False
+        self._cached_detections: list[FaceDetection] = []
+        self._feature_cache: list[_FeatureCacheEntry] = []
+        self._monitor = PerformanceMonitor()
         self._pad_tracker = PadTracker(
             pad_runtime.config if pad_runtime is not None else None
         )
@@ -106,6 +170,7 @@ class LiveCameraWorker(threading.Thread):
 
     def stop(self) -> None:
         self._stop_event.set()
+        self._frames.close()
         self.camera.release()
 
     def _publish(self, result: LiveFrameResult) -> None:
@@ -118,45 +183,148 @@ class LiveCameraWorker(threading.Thread):
         except queue.Full:
             pass
 
+    def _capture_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                frame = self.camera.read()
+            except CameraError as exc:
+                if not self._stop_event.is_set():
+                    self._publish(LiveFrameResult(error=str(exc)))
+                self._stop_event.set()
+                self._frames.close()
+                return
+            except Exception as exc:
+                if not self._stop_event.is_set():
+                    self._publish(
+                        LiveFrameResult(error=f"Camera capture error: {exc}")
+                    )
+                self._stop_event.set()
+                self._frames.close()
+                return
+
+            now = time.perf_counter()
+            if self._capture_last_time:
+                delta = max(1e-6, now - self._capture_last_time)
+                instant_fps = 1.0 / delta
+                self._fps = (
+                    instant_fps
+                    if self._fps == 0.0
+                    else 0.85 * self._fps + 0.15 * instant_fps
+                )
+            self._capture_last_time = now
+            self._frames.put(frame)
+
+    def _detections_for(self, frame: np.ndarray) -> list[FaceDetection]:
+        if (
+            not self._detection_valid
+            or self._frame_counter % self.detection_interval == 0
+        ):
+            started = time.perf_counter()
+            self._cached_detections = self.engine.detect(frame)
+            self._monitor.record_detect(
+                (time.perf_counter() - started) * 1000.0
+            )
+            self._detection_valid = True
+            if not self._cached_detections:
+                self._feature_cache.clear()
+        self._frame_counter += 1
+        return self._cached_detections
+
+    def _feature_for(
+        self, frame: np.ndarray, detection: FaceDetection
+    ) -> np.ndarray:
+        best: _FeatureCacheEntry | None = None
+        best_iou = 0.0
+        for entry in self._feature_cache:
+            iou = _bbox_iou(entry.bbox, detection.bbox)
+            if iou > best_iou:
+                best = entry
+                best_iou = iou
+        if (
+            best is not None
+            and best_iou >= self.feature_cache_iou
+            and self._frame_counter - best.frame_number < self.recognition_interval
+        ):
+            return best.feature
+
+        started = time.perf_counter()
+        feature = self.engine.extract_feature(frame, detection)
+        self._monitor.record_sface((time.perf_counter() - started) * 1000.0)
+        self._feature_cache = [
+            entry
+            for entry in self._feature_cache
+            if _bbox_iou(entry.bbox, detection.bbox) < self.feature_cache_iou
+            and self._frame_counter - entry.frame_number
+            < self.recognition_interval
+        ]
+        self._feature_cache.append(
+            _FeatureCacheEntry(detection.bbox, feature, self._frame_counter)
+        )
+        return feature
+
+    def _process_loop(self) -> None:
+        last_sequence = 0
+        while not self._stop_event.is_set():
+            item = self._frames.get(last_sequence, timeout=0.1)
+            if item is None:
+                continue
+            frame, last_sequence = item
+            now = time.perf_counter()
+            if self._process_last_time:
+                delta = max(1e-6, now - self._process_last_time)
+                instant_fps = 1.0 / delta
+                self._process_fps = (
+                    instant_fps
+                    if self._process_fps == 0.0
+                    else 0.85 * self._process_fps + 0.15 * instant_fps
+                )
+            self._process_last_time = now
+            started = now
+
+            detections = self._detections_for(frame)
+            snapshot = (
+                self.pad_runtime.snapshot()
+                if self.pad_runtime is not None
+                else None
+            )
+            pad_active = snapshot is not None and snapshot.enabled
+            detector_id = (
+                id(snapshot.detector)
+                if snapshot is not None and snapshot.detector is not None
+                else None
+            )
+            if (
+                pad_active != self._pad_was_enabled
+                or detector_id != self._pad_detector_id
+            ):
+                self._pad_tracker.reset("PAD runtime changed")
+                self._last_pad_prediction = None
+                self._feature_cache.clear()
+                self._pad_was_enabled = pad_active
+                self._pad_detector_id = detector_id
+
+            if snapshot is not None and snapshot.enabled:
+                result = self._analyze_protected(frame, detections, snapshot)
+            else:
+                result = self._analyze_unprotected(frame, detections)
+            self._monitor.record_process((time.perf_counter() - started) * 1000.0)
+            result.diagnostics = self._monitor.snapshot(
+                self._fps, self._process_fps, self._frames.dropped
+            )
+            self._publish(result)
+
     def run(self) -> None:
+        capture_thread: threading.Thread | None = None
         try:
             self.camera.open(self.camera_index)
-            while not self._stop_event.is_set():
-                frame = self.camera.read()
-                now = time.perf_counter()
-                delta = max(1e-6, now - self._last_time)
-                self._last_time = now
-                instant_fps = 1.0 / delta
-                self._fps = instant_fps if self._fps == 0.0 else (
-                    0.85 * self._fps + 0.15 * instant_fps
-                )
-
-                detections = self.engine.detect(frame)
-                snapshot = (
-                    self.pad_runtime.snapshot()
-                    if self.pad_runtime is not None
-                    else None
-                )
-                pad_active = snapshot is not None and snapshot.enabled
-                detector_id = (
-                    id(snapshot.detector)
-                    if snapshot is not None and snapshot.detector is not None
-                    else None
-                )
-                if (
-                    pad_active != self._pad_was_enabled
-                    or detector_id != self._pad_detector_id
-                ):
-                    self._pad_tracker.reset("PAD runtime changed")
-                    self._last_pad_prediction = None
-                    self._pad_was_enabled = pad_active
-                    self._pad_detector_id = detector_id
-
-                if snapshot is not None and snapshot.enabled:
-                    result = self._analyze_protected(frame, detections, snapshot)
-                else:
-                    result = self._analyze_unprotected(frame, detections)
-                self._publish(result)
+            capture_thread = threading.Thread(
+                target=self._capture_loop,
+                name="camera-capture",
+                daemon=True,
+            )
+            self._capture_thread = capture_thread
+            capture_thread.start()
+            self._process_loop()
         except CameraError as exc:
             if not self._stop_event.is_set():
                 self._publish(LiveFrameResult(error=str(exc)))
@@ -167,6 +335,10 @@ class LiveCameraWorker(threading.Thread):
             if not self._stop_event.is_set():
                 self._publish(LiveFrameResult(error=f"Camera worker error: {exc}"))
         finally:
+            self._stop_event.set()
+            self._frames.close()
+            if capture_thread is not None and capture_thread.is_alive():
+                capture_thread.join(timeout=1.0)
             self.camera.release()
             self._publish(LiveFrameResult(finished=True))
 
@@ -180,14 +352,12 @@ class LiveCameraWorker(threading.Thread):
         if self.identities:
             for detection in detections:
                 try:
-                    features[detection.index] = self.engine.extract_feature(
-                        frame, detection
-                    )
+                    features[detection.index] = self._feature_for(frame, detection)
                 except FaceEngineError:
                     continue
         elif face is not None and self.template is not None:
             try:
-                features[face.index] = self.engine.extract_feature(frame, face)
+                features[face.index] = self._feature_for(frame, face)
             except FaceEngineError:
                 pass
 
@@ -218,7 +388,7 @@ class LiveCameraWorker(threading.Thread):
             probe = features.get(face.index)
             if probe is None:
                 try:
-                    probe = self.engine.extract_feature(frame, face)
+                    probe = self._feature_for(frame, face)
                 except FaceEngineError:
                     probe = None
             if probe is not None:
@@ -306,6 +476,7 @@ class LiveCameraWorker(threading.Thread):
         if self._pad_tracker.face_changed(primary.bbox):
             self._pad_tracker.reset("face changed")
             self._last_pad_prediction = None
+            self._feature_cache.clear()
 
         should_infer = (
             self._last_pad_prediction is None
@@ -314,6 +485,7 @@ class LiveCameraWorker(threading.Thread):
         self._pad_frame_counter += 1
 
         if should_infer:
+            started = time.perf_counter()
             try:
                 prediction = snapshot.detector.predict(frame, primary)
             except AntiSpoofingError as exc:
@@ -323,6 +495,7 @@ class LiveCameraWorker(threading.Thread):
                     frame, detections, primary, assessment
                 )
             self._last_pad_prediction = prediction
+            self._monitor.record_pad((time.perf_counter() - started) * 1000.0)
         else:
             prediction = self._last_pad_prediction
             if prediction is None:
@@ -345,6 +518,7 @@ class LiveCameraWorker(threading.Thread):
         primary: FaceDetection | None,
         assessment: PadAssessment,
     ) -> LiveFrameResult:
+        self._feature_cache.clear()
         identifications = [
             Identification(None, None, None, False) for _ in detections
         ]
@@ -399,7 +573,7 @@ class LiveCameraWorker(threading.Thread):
         feature: np.ndarray | None = None
         if self.identities or self.template is not None:
             try:
-                feature = self.engine.extract_feature(frame, primary)
+                feature = self._feature_for(frame, primary)
             except FaceEngineError:
                 feature = None
 

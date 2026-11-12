@@ -145,19 +145,43 @@ where the filesystem supports it.
 ## Threading
 
 - Tkinter widgets are touched only on the main thread.
-- `LiveCameraWorker` runs in a daemon thread, reads frames, runs YuNet/SFace,
+- `LiveCameraWorker` uses two daemon threads. The capture thread continuously
+  reads frames into a capacity-1 `LatestFrameBuffer`; the processing thread takes
+  only the newest frame, so inference cannot accumulate a backlog.
+- The processing thread runs YuNet every `DETECTION_INTERVAL` processed frames,
   optionally runs MiniFASNetV2 on the primary face, compares eligible faces with
   the enrolled templates for name labels, and publishes the newest
   `LiveFrameResult` through a bounded queue.
+- SFace embeddings are cached per face region and reused for at most
+  `RECOGNITION_INTERVAL` frames while the box IoU stays above
+  `FEATURE_CACHE_IOU`. The cache is cleared when the face changes, no face is
+  detected, or PAD blocks authentication.
 - PAD inference is cached and repeated every `PAD_FRAME_INTERVAL` frames; the
   temporal tracker requires `PAD_REQUIRED_LIVE_FRAMES` consecutive live results
-  before SFace is allowed to run.
-- The GUI polls the queue with `after(...)`, so a slow inference pass never blocks
-  the event loop.
+  before SFace is allowed to run. Detection/recognition cadence does not change
+  the PAD decision contract.
+- The GUI polls the queue with `after(...)`, drains to the latest result, and
+  renders live previews with a fast resize-before-color-convert path, so a slow
+  inference pass never blocks the event loop.
 - `FaceEngine` and `AntiSpoofingDetector` protect model calls with locks, allowing
   the live worker and a user-triggered operation to coexist safely.
 - `CameraManager` uses an `RLock` for open/read/release and is idempotent on
-  release.
+  release. Blocking reads run outside the lock; if release is requested mid-read,
+  the capture is released by the reader when the read returns, so stopping does
+  not wait on camera I/O. It sets `CAP_PROP_BUFFERSIZE` (default `2`) and records
+  the actual width, height, FPS and buffer size for diagnostics.
+
+## Performance diagnostics
+
+`core/diagnostics.py` defines `PerformanceMonitor` and `PerformanceSnapshot`.
+When `FACE_DIAGNOSTICS=1`, each `LiveFrameResult` carries a snapshot with capture
+and processing FPS, YuNet/SFace/PAD timings, frame processing time, dropped
+frames, CPU usage and process RSS. The Live Camera page shows these values in an optional
+diagnostics row.
+
+`core/frame_buffer.py` provides the thread-safe latest-frame buffer used by the
+worker. `scripts/benchmark_performance.py` measures engine operations, preview
+conversion and an optional real-camera worker run with or without PAD.
 
 ## Error handling
 

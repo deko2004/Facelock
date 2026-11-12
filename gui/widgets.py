@@ -187,9 +187,31 @@ class ImagePanel(ttk.Frame):
         self,
         image: np.ndarray,
         max_size: tuple[int, int] | None = None,
+        fast: bool = False,
     ) -> None:
+        """Display a BGR frame.
+
+        ``fast`` resizes before the colour conversion for live previews.  Static
+        images keep the higher-quality PIL Lanczos path.
+        """
+        target = max_size or self._max_size
+        height, width = image.shape[:2]
+        scale = min(target[0] / width, target[1] / height, 1.0)
+        if fast and scale < 1.0:
+            resized = cv2.resize(
+                image,
+                (max(1, int(round(width * scale))), max(1, int(round(height * scale)))),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            self._display(Image.fromarray(rgb))
+            return
         rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         self.show_pil(Image.fromarray(rgb), max_size=max_size)
+
+    def _display(self, image: Image.Image) -> None:
+        self._photo = ImageTk.PhotoImage(image)
+        self._label.configure(image=self._photo, text="")
 
     def show_pil(
         self,
@@ -199,8 +221,7 @@ class ImagePanel(ttk.Frame):
         target = max_size or self._max_size
         copy = image.copy()
         copy.thumbnail(target, Image.Resampling.LANCZOS)
-        self._photo = ImageTk.PhotoImage(copy)
-        self._label.configure(image=self._photo, text="")
+        self._display(copy)
 
     def clear(self, message: str = "No image selected") -> None:
         self._photo = None

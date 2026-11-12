@@ -9,6 +9,7 @@ from tkinter import ttk
 
 import numpy as np
 
+from config import settings
 from core.camera_manager import list_video_devices
 from core.face_engine import FaceEngine
 from gui.camera_worker import LiveCameraWorker, LiveFrameResult
@@ -147,13 +148,27 @@ class CameraCaptureDialog(tk.Toplevel):
         if self._closed:
             return
         if self._worker is not None:
+            latest: LiveFrameResult | None = None
+            error: LiveFrameResult | None = None
+            finished = False
             while True:
                 try:
                     result = self._worker.result_queue.get_nowait()
                 except queue.Empty:
                     break
-                self._handle(result)
-        self._poll_id = self.after(30, self._poll)
+                if result.error:
+                    error = result
+                elif result.finished:
+                    finished = True
+                else:
+                    latest = result
+            if error is not None:
+                self._handle(error)
+            elif latest is not None:
+                self._handle(latest)
+            elif finished:
+                self._handle(LiveFrameResult(finished=True))
+        self._poll_id = self.after(settings.PREVIEW_REFRESH_MS, self._poll)
 
     def _handle(self, result: LiveFrameResult) -> None:
         if result.finished:
@@ -165,7 +180,9 @@ class CameraCaptureDialog(tk.Toplevel):
             return
         self._latest = result
         if result.annotated_frame is not None:
-            self.panel.show_bgr(result.annotated_frame, max_size=(720, 380))
+            self.panel.show_bgr(
+                result.annotated_frame, max_size=(720, 380), fast=True
+            )
             self.capture_button.configure(state="normal")
         if result.detections:
             self.status_label.configure(

@@ -119,9 +119,19 @@ PAD is a demonstration, not a guarantee. The default thresholds are not calibrat
 for every camera, printer, display or lighting condition. Use the Security page
 and manual printed-photo/screen-replay checks to understand the residual risk.
 
-Camera work runs in a worker thread so the interface stays responsive. The
-worker is stopped and the camera released when the page is hidden or the
-application closes.
+Camera work runs in a dedicated capture thread plus a processing thread so the
+interface stays responsive. The capture thread keeps only the newest frame; the
+processing thread runs YuNet every second frame and reuses an SFace embedding for
+at most two frames while the same face box is present. The worker is stopped and
+the camera released when the page is hidden or the application closes.
+
+Set `FACE_DIAGNOSTICS=1` before launch to show capture/process FPS, YuNet/SFace/PAD
+timings, frame latency, CPU, RAM and dropped frames. Other defaults can be tuned
+with the `FACE_*` variables listed in the README performance section. The
+recognition interval is clamped to at least the detection interval so SFace does
+not reuse stale landmarks. If preview latency matters more than small-face
+accuracy, `FACE_DETECTION_MAX_WIDTH=320` is an optional trade-off; leave it at `0`
+for native-resolution detection.
 
 The name label is a 1:N identification demonstration, not proof of identity. It
 uses the same uncalibrated threshold as verification, and false matches become

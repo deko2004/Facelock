@@ -19,6 +19,9 @@ Tkinter interface, encrypted template storage and an honest evaluation pipeline.
   similarity score with a threshold decision.
 - **Live camera identification and verification**: label detected faces with the
   closest enrolled name, and optionally run 1:1 verification against one user.
+- **Responsive camera pipeline**: a dedicated capture thread feeds the newest
+  frame to a processing thread, with configurable detection/recognition cadence
+  and optional performance diagnostics.
 - **Optional anti-spoofing protection**: toggle MiniFASNetV2 PAD on the Live
   Camera page. When enabled, the largest face must pass a temporal liveness check
   before SFace identity verification runs.
@@ -141,6 +144,44 @@ Artifacts are written to `results/evaluation/`:
 The tiny sample cannot establish real-world accuracy. See
 [docs/evaluation.md](docs/evaluation.md) for the methodology and limitations.
 
+## Performance tuning
+
+The live camera runs capture and inference on separate threads and keeps only the
+newest frame, so a slow inference pass cannot build an unbounded backlog. YuNet
+runs every second processed frame by default, and SFace embeddings are reused only
+while the same face region is still present. PAD scheduling and temporal evidence
+are unchanged.
+
+Defaults are tuned for CPU-only laptops and can be overridden before launch:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `FACE_CAMERA_BUFFERSIZE` | `2` | V4L2 capture buffer; `1` reduced measured camera FPS on the development machine |
+| `FACE_DETECTION_INTERVAL` | `2` | Run YuNet every N processed frames |
+| `FACE_RECOGNITION_INTERVAL` | `2` | Reuse an SFace embedding for at most N frames |
+| `FACE_FEATURE_CACHE_IOU` | `0.5` | Minimum IoU for reusing a cached embedding |
+| `FACE_DETECTION_MAX_WIDTH` | `0` | Optional YuNet downscale width; `0` keeps native resolution |
+| `FACE_OPENCV_THREADS` | `min(2, CPUs)` | OpenCV DNN thread count |
+| `FACE_PAD_THREADS` | `1` | ONNX Runtime threads for PAD |
+| `FACE_PREVIEW_REFRESH_MS` | `33` | GUI preview poll interval |
+| `FACE_DIAGNOSTICS` | `0` | Set to `1` to show live timing/CPU/RAM diagnostics |
+
+`FACE_RECOGNITION_INTERVAL` is clamped to at least `FACE_DETECTION_INTERVAL`, so
+SFace does not align a current frame with stale landmarks. Keep the detection
+interval low for authentication; raising it trades alignment freshness for CPU.
+
+Set `FACE_DETECTION_MAX_WIDTH=320` only if detection latency matters more than
+small-face accuracy. Measure before changing defaults:
+
+```bash
+venv/bin/python scripts/benchmark_performance.py --camera --seconds 5
+venv/bin/python scripts/benchmark_performance.py --camera --pad --json
+```
+
+On the development machine, the refactor kept actual-camera throughput at about
+15 results/s while roughly halving process CPU time versus the original
+single-threaded worker. Exact numbers vary with CPU load and camera drivers.
+
 ## Security and privacy
 
 - Embeddings are encrypted at rest with Fernet (AES-128-CBC + HMAC-SHA256).
@@ -164,10 +205,11 @@ The full threat model is in
 venv/bin/python -m pytest
 ```
 
-Current result: **105 passed**. The suite covers model loading and detection,
+Current result: **117 passed**. The suite covers model loading and detection,
 quality checks, matching math, 1:N identification labels, encryption, database
 behaviour, enrolment, verification, evaluation, camera lifecycle with mocked
-captures, settings, PAD preprocessing/class mapping, temporal PAD decisions,
+captures, latest-frame buffering, performance diagnostics, worker scheduling and
+caching, settings, PAD preprocessing/class mapping, temporal PAD decisions,
 PAD-blocked camera results and a GUI page-construction smoke test. The PAD
 effectiveness tests use the official Silent-Face genuine/attack samples and a
 synthetic screen-replay sample. The GUI smoke test is skipped automatically when
@@ -185,7 +227,7 @@ models/       YuNet, SFace and optional MiniFASNetV2 ONNX files
 images/       Sample images and the small public evaluation demo
 database/     Local SQLite database and encryption key (git-ignored)
 results/      Generated evaluation artifacts
-scripts/      Command-line evaluation runner
+scripts/      Command-line evaluation and performance benchmark runners
 tests/        pytest suite
 docs/         Setup, usage, architecture, security, evaluation and tool selection
 ```

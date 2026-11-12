@@ -76,12 +76,15 @@ class FaceEngine:
         score_threshold: float = settings.YUNET_SCORE_THRESHOLD,
         nms_threshold: float = settings.YUNET_NMS_THRESHOLD,
         top_k: int = settings.YUNET_TOP_K,
+        detection_max_width: int = settings.DETECTION_MAX_WIDTH,
     ) -> None:
+        cv2.setNumThreads(max(1, int(settings.OPENCV_NUM_THREADS)))
         self.detector_path = Path(detector_path)
         self.recognizer_path = Path(recognizer_path)
         self.score_threshold = float(score_threshold)
         self.nms_threshold = float(nms_threshold)
         self.top_k = int(top_k)
+        self.detection_max_width = max(0, int(detection_max_width))
         self._lock = threading.RLock()
         self._cosine_type = _resolve_cosine_constant()
         self._l2_type = _resolve_l2_constant()
@@ -147,16 +150,36 @@ class FaceEngine:
         return image
 
     def detect(self, image: np.ndarray) -> list[FaceDetection]:
-        """Detect faces with YuNet, returning detections in model order."""
+        """Detect faces with YuNet, returning detections in model order.
+
+        If ``detection_max_width`` is set, YuNet runs on a down-scaled copy and
+        the returned landmarks are mapped back to the original frame so SFace
+        alignment still uses full-resolution pixels.
+        """
         bgr = self._ensure_bgr(image)
         height, width = bgr.shape[:2]
         if height < 10 or width < 10:
             return []
+
+        scale = 1.0
+        detect_image = bgr
+        if self.detection_max_width and width > self.detection_max_width:
+            scale = self.detection_max_width / float(width)
+            detect_image = cv2.resize(
+                bgr,
+                (
+                    max(10, int(round(width * scale))),
+                    max(10, int(round(height * scale))),
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
+        detect_height, detect_width = detect_image.shape[:2]
+
         with self._lock:
             assert self._detector is not None
             try:
-                self._detector.setInputSize((int(width), int(height)))
-                _, faces = self._detector.detect(bgr)
+                self._detector.setInputSize((int(detect_width), int(detect_height)))
+                _, faces = self._detector.detect(detect_image)
             except cv2.error as exc:
                 raise FaceEngineError(f"Face detection failed: {exc}") from exc
 
@@ -170,12 +193,16 @@ class FaceEngine:
 
         detections: list[FaceDetection] = []
         for index, row in enumerate(array):
-            x, y, w, h = (int(round(float(v))) for v in row[:4])
+            raw = np.asarray(row, dtype=np.float32).copy()
+            if scale != 1.0:
+                raw[:14] /= scale
+            values = [int(round(float(v))) for v in raw[:4]]
+            x, y, w, h = values
             clipped_x = max(0, min(x, width - 1))
             clipped_y = max(0, min(y, height - 1))
             clipped_w = max(0, min(w, width - clipped_x))
             clipped_h = max(0, min(h, height - clipped_y))
-            score = float(row[-1]) if row.size >= 15 else 0.0
+            score = float(raw[-1]) if raw.size >= 15 else 0.0
             detections.append(
                 FaceDetection(
                     index=index,
@@ -184,7 +211,7 @@ class FaceEngine:
                     w=clipped_w,
                     h=clipped_h,
                     score=score,
-                    raw=np.asarray(row, dtype=np.float32).copy(),
+                    raw=raw,
                 )
             )
         return detections

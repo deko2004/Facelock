@@ -137,6 +137,7 @@ class AntiSpoofingDetector:
         crop_scale: float = settings.PAD_CROP_SCALE,
         input_size: tuple[int, int] = settings.PAD_INPUT_SIZE,
         providers: list[str] | None = None,
+        num_threads: int = settings.PAD_NUM_THREADS,
     ) -> None:
         self.model_path = Path(model_path) if model_path is not None else settings.PAD_MODEL
         self.live_threshold = _clamp01(live_threshold)
@@ -144,6 +145,7 @@ class AntiSpoofingDetector:
         self.crop_scale = max(1.0, float(crop_scale))
         self._input_size = (max(1, int(input_size[0])), max(1, int(input_size[1])))
         self._providers = list(providers or ["CPUExecutionProvider"])
+        self._num_threads = max(1, int(num_threads))
         self._lock = threading.RLock()
         self._session = None
         self._input_name = ""
@@ -181,8 +183,13 @@ class AntiSpoofingDetector:
                 f"Anti-spoofing model must be an ONNX file: {self.model_path}"
             )
         try:
+            options = ort.SessionOptions()
+            options.intra_op_num_threads = self._num_threads
+            options.inter_op_num_threads = 1
             session = ort.InferenceSession(
-                str(self.model_path), providers=self._providers
+                str(self.model_path),
+                sess_options=options,
+                providers=self._providers,
             )
         except Exception as exc:  # onnxruntime raises several backend-specific errors
             raise AntiSpoofingError(

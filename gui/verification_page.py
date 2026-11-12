@@ -7,6 +7,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from config import settings
 from core.database import DatabaseError, UserNotFoundError
 from core.face_engine import FaceDetection
 from core.image_processor import draw_faces, load_image
@@ -377,14 +378,28 @@ class VerificationPage(BasePage):
     def _poll(self) -> None:
         if self._worker is None:
             return
+        latest: LiveFrameResult | None = None
+        error: LiveFrameResult | None = None
+        finished = False
         while True:
             try:
                 result = self._worker.result_queue.get_nowait()
             except queue.Empty:
                 break
-            self._handle_camera(result)
+            if result.error:
+                error = result
+            elif result.finished:
+                finished = True
+            else:
+                latest = result
+        if error is not None:
+            self._handle_camera(error)
+        elif latest is not None:
+            self._handle_camera(latest)
+        elif finished:
+            self._handle_camera(LiveFrameResult(finished=True))
         if self._worker is not None and self._worker.is_alive():
-            self._poll_id = self.after(30, self._poll)
+            self._poll_id = self.after(settings.PREVIEW_REFRESH_MS, self._poll)
         else:
             self._poll_id = None
 
@@ -400,7 +415,9 @@ class VerificationPage(BasePage):
         if result.finished:
             return
         if result.annotated_frame is not None:
-            self.camera_panel.show_bgr(result.annotated_frame, max_size=(520, 300))
+            self.camera_panel.show_bgr(
+                result.annotated_frame, max_size=(520, 300), fast=True
+            )
         self.camera_status_label.configure(
             text=(
                 f"Status: {len(result.detections)} face(s) detected, "

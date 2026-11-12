@@ -34,6 +34,24 @@ def test_detect_face_in_sample(engine: FaceEngine, sample_image_path: Path) -> N
     assert face.raw.size >= 15
 
 
+def test_detection_max_width_maps_landmarks_to_original(
+    engine: FaceEngine, sample_image_path: Path
+) -> None:
+    image = cv2.imread(str(sample_image_path))
+    assert image is not None
+    scaled_engine = FaceEngine(detection_max_width=320)
+    detections = scaled_engine.detect(image)
+    assert detections
+    height, width = image.shape[:2]
+    for detection in detections:
+        assert 0 <= detection.x < width
+        assert 0 <= detection.y < height
+        assert detection.w > 0 and detection.h > 0
+        assert detection.raw.size >= 15
+        assert detection.raw[0] <= width
+        assert detection.raw[1] <= height
+
+
 def test_no_face_image(engine: FaceEngine, no_face_image: Path) -> None:
     image = cv2.imread(str(no_face_image))
     assert engine.detect(image) == []

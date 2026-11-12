@@ -10,7 +10,7 @@ venv/bin/python -m pytest
 Observed result:
 
 ```text
-105 passed (about 17s on the development machine)
+117 passed (about 15s on the development machine)
 ```
 
 The suite does not require a physical webcam. It uses temporary databases, keys
@@ -29,7 +29,8 @@ and images, so it does not modify the real `database/` or `results/` folders.
 | Verification | Same person, different person, unknown user, no face, deletion, shared threshold update |
 | Evaluation | Confusion matrix, FAR/FRR/accuracy/precision/recall, missing/empty dataset, demo dataset, no-genuine-pair case, CSV and chart export |
 | PAD | ONNX input/output contract, raw `0..255` preprocessing, official genuine/fake samples, synthetic screen replay, temporal evidence/reset, service load/error paths, worker blocking and SFace-after-live |
-| Camera | Device enumeration shape, read-before-open error, open failure, mocked open/read/release, probe success/failure, worker name labels |
+| Camera | Device enumeration shape, read-before-open error, open failure, mocked open/read/release, buffer-size property, deferred release during a blocking read, probe success/failure, worker name labels |
+| Performance | Latest-frame replacement/drop counting, diagnostics summary/CPU-RSS sampling, detection/recognition cadence, feature-cache reuse/invalidation, lifecycle stop/join |
 | Settings | Threshold clamp, save/load, invalid/missing settings fallback |
 | GUI | Every page constructs, shows and hides under a real Tk display; background results are delivered on the main thread |
 
@@ -60,6 +61,27 @@ DISPLAY=:1 venv/bin/python -m pytest tests/test_gui_smoke.py -v
 
 This is a regression test for the pipeline, not a performance benchmark.
 
+## Performance test
+
+`tests/test_frame_buffer.py` and `tests/test_diagnostics.py` cover the latest-frame
+buffer and diagnostics primitives. `tests/test_camera_worker.py` covers detection
+and recognition cadence, feature-cache reuse/invalidation, PAD scheduling and
+worker shutdown. `tests/test_camera_manager.py` covers capture buffer settings.
+
+Use the benchmark runner for local measurements:
+
+```bash
+venv/bin/python scripts/benchmark_performance.py
+venv/bin/python scripts/benchmark_performance.py --camera --seconds 5
+venv/bin/python scripts/benchmark_performance.py --camera --pad --json
+```
+
+The benchmark is not part of the test suite because webcam availability, CPU load
+and drivers vary. On the development machine the refactor kept actual-camera
+throughput near 15 results/s while roughly halving process CPU time; preview
+conversion also dropped from roughly 11 ms to a few milliseconds on the fast
+path. Treat those numbers as environment-specific, not guarantees.
+
 ## PAD test
 
 `tests/test_anti_spoofing.py` loads the real `MiniFASNetV2.onnx` model. It checks:
@@ -85,7 +107,8 @@ The automated suite cannot replace a manual GUI/camera check:
 3. Open each page.
 4. Enrol a test user from an image.
 5. Verify the same image and a different person's image.
-6. Start the live camera, confirm preview/FPS, then stop.
+6. Start the live camera, confirm preview/FPS, then stop. Optionally relaunch
+   with `FACE_DIAGNOSTICS=1` and confirm the diagnostics row updates.
 7. Enable **Anti-Spoofing Protection**, confirm the model loads, present a live
    face and confirm SFace runs only after live evidence accumulates.
 8. Present a printed photo or a face on a phone/tablet screen and confirm the

@@ -12,6 +12,7 @@ import os
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -95,6 +96,12 @@ class CameraManager:
         self._capture: cv2.VideoCapture | None = None
         self._index: int | None = None
         self._lock = threading.RLock()
+        self._width = 0
+        self._height = 0
+        self._fps = 0.0
+        self._buffersize = 0
+        self._active_reads: dict[int, int] = {}
+        self._pending_releases: dict[int, Any] = {}
 
     @property
     def is_open(self) -> bool:
@@ -105,12 +112,33 @@ class CameraManager:
     def index(self) -> int | None:
         return self._index
 
+    @property
+    def properties(self) -> dict[str, int | float]:
+        with self._lock:
+            return {
+                "width": self._width,
+                "height": self._height,
+                "fps": self._fps,
+                "buffersize": self._buffersize,
+            }
+
+    @staticmethod
+    def _get_capture_property(capture, prop: int) -> float:
+        getter = getattr(capture, "get", None)
+        if not callable(getter):
+            return 0.0
+        try:
+            return float(getter(prop))
+        except (cv2.error, TypeError, ValueError):
+            return 0.0
+
     def open(
         self,
         index: int = 0,
         width: int = settings.CAMERA_WIDTH,
         height: int = settings.CAMERA_HEIGHT,
         fps: int = settings.CAMERA_FPS,
+        buffersize: int = settings.CAMERA_BUFFERSIZE,
     ) -> None:
         """Open a camera by index, trying V4L2 then the default backend."""
         self.release()
@@ -131,12 +159,34 @@ class CameraManager:
                 last_error = str(exc)
                 continue
             if capture.isOpened():
-                capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
-                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
-                capture.set(cv2.CAP_PROP_FPS, int(fps))
+                try:
+                    capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
+                    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+                    capture.set(cv2.CAP_PROP_FPS, int(fps))
+                    capture.set(cv2.CAP_PROP_BUFFERSIZE, max(1, int(buffersize)))
+                except cv2.error:
+                    pass
                 with self._lock:
                     self._capture = capture
                     self._index = int(index)
+                    self._width = int(
+                        self._get_capture_property(
+                            capture, cv2.CAP_PROP_FRAME_WIDTH
+                        )
+                    )
+                    self._height = int(
+                        self._get_capture_property(
+                            capture, cv2.CAP_PROP_FRAME_HEIGHT
+                        )
+                    )
+                    self._fps = self._get_capture_property(
+                        capture, cv2.CAP_PROP_FPS
+                    )
+                    self._buffersize = int(
+                        self._get_capture_property(
+                            capture, cv2.CAP_PROP_BUFFERSIZE
+                        )
+                    )
                 return
             capture.release()
             last_error = "camera did not open"
@@ -147,31 +197,72 @@ class CameraManager:
         )
 
     def read(self) -> np.ndarray:
-        """Read one frame, raising CameraError on failure."""
+        """Read one frame, raising CameraError on failure.
+
+        The blocking read runs outside the manager lock so ``release()`` never
+        waits on camera I/O.  If release is requested mid-read, the capture
+        object is released by the reader as soon as the read returns.
+        """
         with self._lock:
             capture = self._capture
-        if capture is None or not capture.isOpened():
-            raise CameraError("Camera is not open.")
+            if capture is None or not capture.isOpened():
+                raise CameraError("Camera is not open.")
+            key = id(capture)
+            self._active_reads[key] = self._active_reads.get(key, 0) + 1
         try:
-            ok, frame = capture.read()
-        except cv2.error as exc:
-            raise CameraError(f"Camera read failed: {exc}") from exc
-        if not ok or frame is None or frame.size == 0:
-            raise CameraError(
-                "Camera returned an empty frame. Check the connection or "
-                "whether another application is using the camera."
-            )
-        return frame
+            try:
+                ok, frame = capture.read()
+            except cv2.error as exc:
+                raise CameraError(f"Camera read failed: {exc}") from exc
+            if not ok or frame is None or frame.size == 0:
+                raise CameraError(
+                    "Camera returned an empty frame. Check the connection or "
+                    "whether another application is using the camera."
+                )
+            return frame
+        finally:
+            self._finish_read(key)
+
+    def _finish_read(self, key: int) -> None:
+        pending = None
+        with self._lock:
+            remaining = self._active_reads.get(key, 1) - 1
+            if remaining > 0:
+                self._active_reads[key] = remaining
+            else:
+                self._active_reads.pop(key, None)
+                pending = self._pending_releases.pop(key, None)
+        if pending is not None:
+            try:
+                pending.release()
+            except cv2.error:
+                pass
 
     def release(self) -> None:
-        """Release the camera.  Safe to call more than once."""
+        """Release the camera.  Safe to call more than once.
+
+        If a read is in progress, release is deferred until that read returns
+        so the capture object is never freed underneath a blocking backend call.
+        """
+        capture_to_release = None
         with self._lock:
             capture = self._capture
             self._capture = None
             self._index = None
-        if capture is not None:
+            self._width = 0
+            self._height = 0
+            self._fps = 0.0
+            self._buffersize = 0
+            if capture is not None:
+                key = id(capture)
+                if self._active_reads.get(key, 0) > 0:
+                    self._pending_releases[key] = capture
+                else:
+                    self._pending_releases.pop(key, None)
+                    capture_to_release = capture
+        if capture_to_release is not None:
             try:
-                capture.release()
+                capture_to_release.release()
             except cv2.error:
                 pass
 

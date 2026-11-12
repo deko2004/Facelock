@@ -13,6 +13,28 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 MODELS_DIR = BASE_DIR / "models"
 DATABASE_DIR = BASE_DIR / "database"
 IMAGES_DIR = BASE_DIR / "images"
@@ -67,9 +89,34 @@ MODEL_LABEL = "SFace 2021dec (128-D)"
 DETECTOR_LABEL = "YuNet 2023mar"
 
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
-CAMERA_FPS = 30
+CAMERA_WIDTH = _env_int("FACE_CAMERA_WIDTH", 640)
+CAMERA_HEIGHT = _env_int("FACE_CAMERA_HEIGHT", 480)
+CAMERA_FPS = _env_int("FACE_CAMERA_FPS", 30)
+CAMERA_BUFFERSIZE = max(1, _env_int("FACE_CAMERA_BUFFERSIZE", 2))
+RESULT_QUEUE_SIZE = max(1, _env_int("FACE_RESULT_QUEUE_SIZE", 2))
+
+#: Detection runs every N processed frames.  The default keeps fresh boxes for
+#: authentication; slower machines can raise it to trade box refresh rate for CPU.
+DETECTION_INTERVAL = max(1, _env_int("FACE_DETECTION_INTERVAL", 2))
+#: SFace runs at most once per face every N processed frames.  Cached embeddings
+#: are reused only while the same face region is still present.
+RECOGNITION_INTERVAL = max(1, _env_int("FACE_RECOGNITION_INTERVAL", 2))
+FEATURE_CACHE_IOU = max(0.0, min(1.0, _env_float("FACE_FEATURE_CACHE_IOU", 0.5)))
+
+#: Optional down-scaling for YuNet input only.  ``0`` keeps native resolution.
+#: Bounding boxes and landmarks are scaled back before SFace alignment.
+DETECTION_MAX_WIDTH = max(0, _env_int("FACE_DETECTION_MAX_WIDTH", 0))
+
+#: OpenCV DNN defaults to every CPU core, which raises CPU use with little
+#: latency benefit.  Two threads kept full preview FPS at about one CPU core on
+#: the development machine; raise this if detection latency matters more.
+OPENCV_NUM_THREADS = max(
+    1, _env_int("FACE_OPENCV_THREADS", min(2, os.cpu_count() or 1))
+)
+PAD_NUM_THREADS = max(1, _env_int("FACE_PAD_THREADS", 1))
+
+PREVIEW_REFRESH_MS = max(15, _env_int("FACE_PREVIEW_REFRESH_MS", 33))
+PERFORMANCE_DIAGNOSTICS = _env_bool("FACE_DIAGNOSTICS", False)
 
 #: OpenCV's published SFace cosine threshold for its LFW calibration.  This is
 #: *not* a universal threshold and is not calibrated for this application.

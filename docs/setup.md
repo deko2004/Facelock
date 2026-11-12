@@ -96,6 +96,23 @@ The model requires `onnxruntime`, which is listed in `requirements.txt`. The
 exact preprocessing contract and Apache-2.0 attribution are in
 `models/anti_spoofing/README.md`.
 
+## Performance settings
+
+The camera pipeline defaults to a dedicated capture thread, latest-frame
+buffering, YuNet every second processed frame, SFace reuse for at most two frames
+and two OpenCV DNN threads. Override these before launch if needed:
+
+```bash
+FACE_DIAGNOSTICS=1 ./run.sh
+FACE_DETECTION_INTERVAL=3 FACE_RECOGNITION_INTERVAL=3 ./run.sh
+FACE_CAMERA_BUFFERSIZE=2 FACE_OPENCV_THREADS=2 ./run.sh
+```
+
+Use `FACE_DETECTION_MAX_WIDTH=320` only if detection latency matters more than
+small-face accuracy. `FACE_CAMERA_BUFFERSIZE=1` reduced measured camera FPS on
+the development machine; keep the default unless your driver behaves differently.
+The full variable list and a repeatable benchmark are documented in the README.
+
 ## Camera permissions
 
 Check that your user can read and write the device:
